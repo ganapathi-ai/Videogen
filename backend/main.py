@@ -56,8 +56,8 @@ class GenerateRequest(BaseModel):
     topic: str
     length: str = "short"          # "short" (35s) | "medium" (60s)
     aspect_ratio: str = "9:16"     # "9:16" | "16:9" | "1:1"
-    voice: str = "af_bella"
-    fps: int = 60
+    voice: str = "gb_ryan"         # Default: Ryan deep British (best for Stoic)
+    fps: int = 30                  # 30fps — smooth on CPU, standard for YouTube Shorts
 
 # ─────────────────────────────────────────────
 # Progress Helper
