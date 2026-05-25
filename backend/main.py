@@ -247,6 +247,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         media_engine = FreeMediaEngine(
             pexels_key=os.getenv("PEXELS_API_KEY", ""),
             pixabay_key=os.getenv("PIXABAY_API_KEY", ""),
+            unsplash_key=os.getenv("UNSPLASH_ACCESS_KEY", ""),
             faiss_engine=faiss,
         )
         clips = []

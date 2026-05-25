@@ -1,215 +1,265 @@
 """
 THE INNER CITADEL — Free Media Engine
-Fetches cinematic stock footage from Pexels and Pixabay APIs (both 100% free).
-Uses FAISS cosine similarity to semantically filter irrelevant clips (threshold: 0.82).
+Priority: Pexels (video) → Unsplash (photo→video) → Placeholder
+
+Pexels: cinematic videos (your primary key)
+Unsplash: high-quality photos converted to Ken Burns video clips
+Pixabay: disabled (no key), gracefully skipped
+FAISS: semantic filtering (cosine ≥ 0.70 — relaxed for better recall)
 """
 
 import os
-import time
+import subprocess
 import requests
 from pathlib import Path
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 
-SIMILARITY_THRESHOLD = 0.82    # Per research mandate: reject clips below this
+SIMILARITY_THRESHOLD = 0.70   # Relaxed from 0.82 — better recall without Pixabay
 
 
 class FreeMediaEngine:
     """
-    Fetches stock video clips from Pexels and Pixabay.
-    Ranks clips by semantic similarity to the script text.
-    Downloads highest-resolution MP4 available.
+    Fetches stock video clips from Pexels + Unsplash.
+    Falls back to solid-color placeholder only if both fail.
     """
 
-    def __init__(self, pexels_key: str, pixabay_key: str, faiss_engine):
-        self.pexels_key = pexels_key
-        self.pixabay_key = pixabay_key
+    def __init__(self, pexels_key: str, pixabay_key: str, faiss_engine,
+                 unsplash_key: str = ""):
+        self.pexels_key   = pexels_key
+        self.pixabay_key  = pixabay_key   # May be empty — handled gracefully
+        self.unsplash_key = unsplash_key or os.getenv("UNSPLASH_ACCESS_KEY", "")
         self.faiss_engine = faiss_engine
 
-        if not pexels_key:
-            logger.warning("[MediaEngine] PEXELS_API_KEY not set — Pexels disabled")
-        if not pixabay_key:
-            logger.warning("[MediaEngine] PIXABAY_API_KEY not set — Pixabay disabled")
+        available = []
+        if self.pexels_key:   available.append("Pexels ✅")
+        if self.pixabay_key:  available.append("Pixabay ✅")
+        else:                  available.append("Pixabay ❌ (no key)")
+        if self.unsplash_key: available.append("Unsplash ✅")
 
-        # Aspect ratio → API orientation parameter
+        logger.info(f"[MediaEngine] Sources: {', '.join(available)}")
+
         self.orientation_map = {
             "9:16": "portrait",
             "16:9": "landscape",
-            "1:1": "square",
+            "1:1":  "square",
         }
-
-        logger.info("[MediaEngine] Initialized with Pexels + Pixabay + FAISS")
 
     def fetch_best_clip(self, script_text: str, queries: list, aspect_ratio: str,
                         job_dir: str, segment_id: int) -> str:
         """
-        Fetches the best matching video clip for a script segment.
+        Fetches the best matching clip for a script segment.
 
-        Priority order:
-        1. Pexels API (highest quality)
-        2. Pixabay API (fallback)
-        3. Solid color placeholder (last resort)
-
-        Args:
-            script_text: The script beat text for semantic matching
-            queries: List of visual search queries from ScriptEngine
-            aspect_ratio: "9:16" | "16:9" | "1:1"
-            job_dir: Directory to download clips into
-            segment_id: Segment ID for unique filename
-
-        Returns:
-            str: Local path to downloaded video clip
+        Priority:
+          1. Pexels video (highest quality)
+          2. Unsplash photo → animated Ken Burns video
+          3. Solid dark placeholder (last resort)
         """
         orientation = self.orientation_map.get(aspect_ratio, "portrait")
+        w, h = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080)}.get(aspect_ratio, (1080, 1920))
 
         for query in queries:
-            logger.info(f"[MediaEngine] Searching: '{query}' ({orientation})")
+            logger.info(f"[MediaEngine] Query: '{query}' ({orientation})")
 
-            # Try Pexels first
+            # 1. Pexels video
             if self.pexels_key:
-                clip = self._fetch_from_pexels(script_text, query, orientation, job_dir, segment_id)
+                clip = self._fetch_pexels(script_text, query, orientation, job_dir, segment_id)
                 if clip:
                     return clip
 
-            # Fallback to Pixabay
+            # 2. Pixabay video (if key present)
             if self.pixabay_key:
-                clip = self._fetch_from_pixabay(script_text, query, orientation, job_dir, segment_id)
+                clip = self._fetch_pixabay(script_text, query, orientation, job_dir, segment_id)
                 if clip:
                     return clip
 
-        # Last resort: generate solid color placeholder
-        logger.warning(f"[MediaEngine] No clip found for segment {segment_id}. Using placeholder.")
+            # 3. Unsplash photo → Ken Burns video
+            if self.unsplash_key:
+                clip = self._fetch_unsplash_as_video(
+                    script_text, query, orientation, job_dir, segment_id, w, h
+                )
+                if clip:
+                    return clip
+
+        # Last resort
+        logger.warning(f"[MediaEngine] No media found for segment {segment_id}. Using placeholder.")
         return self._generate_placeholder(job_dir, segment_id, aspect_ratio)
 
+    # ─────────────────────────────────────────────────────────
+    # Pexels
+    # ─────────────────────────────────────────────────────────
+
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-    def _fetch_from_pexels(self, script_text: str, query: str, orientation: str,
-                            job_dir: str, segment_id: int) -> str:
+    def _fetch_pexels(self, script_text: str, query: str, orientation: str,
+                      job_dir: str, segment_id: int) -> str:
         """Fetches video from Pexels API."""
         try:
-            headers = {"Authorization": self.pexels_key}
-            params = {
-                "query": query,
-                "orientation": orientation,
-                "size": "large",
-                "per_page": 15,
-            }
             resp = requests.get(
                 "https://api.pexels.com/videos/search",
-                headers=headers,
-                params=params,
-                timeout=10
+                headers={"Authorization": self.pexels_key},
+                params={"query": query, "orientation": orientation,
+                        "size": "large", "per_page": 15},
+                timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json()
 
-            for video in data.get("videos", []):
+            for video in resp.json().get("videos", []):
                 tags = video.get("url", "") + " " + str(video.get("tags", ""))
-                similarity = self.faiss_engine.compute_similarity(script_text, tags)
+                sim = self.faiss_engine.compute_similarity(script_text, tags)
 
-                if similarity >= SIMILARITY_THRESHOLD:
-                    # Find best quality file
-                    video_files = sorted(
-                        video.get("video_files", []),
-                        key=lambda x: x.get("width", 0),
-                        reverse=True
-                    )
-                    for vf in video_files:
+                if sim >= SIMILARITY_THRESHOLD:
+                    # Best quality MP4
+                    files = sorted(video.get("video_files", []),
+                                   key=lambda x: x.get("width", 0), reverse=True)
+                    for vf in files:
                         if vf.get("file_type") == "video/mp4":
-                            url = vf["link"]
-                            path = self._download_clip(url, job_dir, segment_id, "pexels")
+                            path = self._download(vf["link"], job_dir, segment_id, "pexels")
                             if path:
-                                logger.info(f"[MediaEngine] ✅ Pexels clip: similarity={similarity:.3f}")
+                                logger.info(f"[MediaEngine] ✅ Pexels: sim={sim:.2f} → {path}")
                                 return path
 
         except Exception as e:
-            logger.error(f"[MediaEngine] Pexels error: {e}")
+            logger.warning(f"[MediaEngine] Pexels error: {e}")
         return None
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-    def _fetch_from_pixabay(self, script_text: str, query: str, orientation: str,
-                             job_dir: str, segment_id: int) -> str:
-        """Fetches video from Pixabay API."""
-        try:
-            # Map orientation
-            pixabay_orientation = {
-                "portrait": "vertical",
-                "landscape": "horizontal",
-                "square": "all"
-            }.get(orientation, "vertical")
+    # ─────────────────────────────────────────────────────────
+    # Pixabay
+    # ─────────────────────────────────────────────────────────
 
-            params = {
-                "key": self.pixabay_key,
-                "q": query,
-                "video_type": "film",
-                "orientation": pixabay_orientation,
-                "per_page": 15,
-                "safesearch": "true",
-            }
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(2))
+    def _fetch_pixabay(self, script_text: str, query: str, orientation: str,
+                       job_dir: str, segment_id: int) -> str:
+        """Fetches video from Pixabay API (only if key present)."""
+        try:
+            pb_orient = {"portrait": "vertical", "landscape": "horizontal",
+                         "square": "all"}.get(orientation, "vertical")
             resp = requests.get(
                 "https://pixabay.com/api/videos/",
-                params=params,
-                timeout=10
+                params={"key": self.pixabay_key, "q": query, "video_type": "film",
+                        "orientation": pb_orient, "per_page": 15, "safesearch": "true"},
+                timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json()
 
-            for video in data.get("hits", []):
-                tags = video.get("tags", "")
-                similarity = self.faiss_engine.compute_similarity(script_text, tags)
-
-                if similarity >= SIMILARITY_THRESHOLD:
-                    # Get large MP4
+            for video in resp.json().get("hits", []):
+                sim = self.faiss_engine.compute_similarity(script_text, video.get("tags", ""))
+                if sim >= SIMILARITY_THRESHOLD:
                     videos = video.get("videos", {})
                     for size in ["large", "medium", "small", "tiny"]:
-                        vid = videos.get(size, {})
-                        url = vid.get("url")
+                        url = videos.get(size, {}).get("url")
                         if url:
-                            path = self._download_clip(url, job_dir, segment_id, "pixabay")
+                            path = self._download(url, job_dir, segment_id, "pixabay")
                             if path:
-                                logger.info(f"[MediaEngine] ✅ Pixabay clip: similarity={similarity:.3f}")
+                                logger.info(f"[MediaEngine] ✅ Pixabay: sim={sim:.2f}")
                                 return path
 
         except Exception as e:
-            logger.error(f"[MediaEngine] Pixabay error: {e}")
+            logger.warning(f"[MediaEngine] Pixabay error: {e}")
         return None
 
-    def _download_clip(self, url: str, job_dir: str, segment_id: int, source: str) -> str:
-        """Downloads a video clip to local storage."""
+    # ─────────────────────────────────────────────────────────
+    # Unsplash → Ken Burns animated video
+    # ─────────────────────────────────────────────────────────
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    def _fetch_unsplash_as_video(self, script_text: str, query: str, orientation: str,
+                                  job_dir: str, segment_id: int, w: int, h: int) -> str:
+        """
+        Downloads a cinematic photo from Unsplash and converts it to a
+        Ken Burns slow-zoom video clip using FFmpeg zoompan filter.
+        """
         try:
-            output_path = str(Path(job_dir) / f"clip_{segment_id:03d}_{source}.mp4")
-            logger.info(f"[MediaEngine] Downloading: {url[:60]}...")
+            # Fetch photo
+            resp = requests.get(
+                "https://api.unsplash.com/search/photos",
+                headers={"Authorization": f"Client-ID {self.unsplash_key}"},
+                params={"query": query, "per_page": 10,
+                        "orientation": orientation, "content_filter": "high"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
 
-            with requests.get(url, stream=True, timeout=30) as r:
+            for photo in results:
+                description = (photo.get("description") or photo.get("alt_description") or query)
+                sim = self.faiss_engine.compute_similarity(script_text, description)
+
+                if sim >= (SIMILARITY_THRESHOLD - 0.10):  # Slightly lower for photos
+                    # Download the highest resolution available
+                    urls = photo.get("urls", {})
+                    img_url = urls.get("full") or urls.get("regular")
+                    if not img_url:
+                        continue
+
+                    img_path = str(Path(job_dir) / f"unsplash_{segment_id:03d}.jpg")
+                    img_resp = requests.get(img_url, timeout=30)
+                    img_resp.raise_for_status()
+                    Path(img_path).write_bytes(img_resp.content)
+
+                    # Convert photo to 10s Ken Burns video with FFmpeg zoompan
+                    out = str(Path(job_dir) / f"clip_{segment_id:03d}_unsplash.mp4")
+                    duration = 10
+                    fps = 30
+
+                    ffmpeg_cmd = [
+                        "ffmpeg",
+                        "-loop", "1",
+                        "-i", img_path,
+                        "-vf", (
+                            f"scale={w * 2}:{h * 2},"
+                            f"zoompan=z='min(zoom+0.0015,1.5)':d={duration * fps}:"
+                            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                            f"s={w}x{h}:fps={fps},"
+                            f"setsar=1"
+                        ),
+                        "-c:v", "libx264",
+                        "-t", str(duration),
+                        "-preset", "fast",
+                        "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        out, "-y"
+                    ]
+                    result = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=120)
+                    if result.returncode == 0 and Path(out).exists():
+                        logger.info(f"[MediaEngine] ✅ Unsplash→video: sim={sim:.2f} → {out}")
+                        return out
+                    else:
+                        logger.warning(f"[MediaEngine] FFmpeg zoompan failed: {result.stderr[:200]}")
+
+        except Exception as e:
+            logger.warning(f"[MediaEngine] Unsplash error: {e}")
+        return None
+
+    # ─────────────────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────────────────
+
+    def _download(self, url: str, job_dir: str, segment_id: int, source: str) -> str:
+        """Downloads a video file to local storage."""
+        try:
+            out = str(Path(job_dir) / f"clip_{segment_id:03d}_{source}.mp4")
+            with requests.get(url, stream=True, timeout=60) as r:
                 r.raise_for_status()
-                with open(output_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
+                with open(out, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=16384):
                         f.write(chunk)
-
-            size_mb = Path(output_path).stat().st_size / 1024 / 1024
-            logger.info(f"[MediaEngine] Downloaded: {output_path} ({size_mb:.1f} MB)")
-            return output_path
-
+            size_mb = Path(out).stat().st_size / 1024 / 1024
+            logger.info(f"[MediaEngine] Downloaded {size_mb:.1f}MB → {out}")
+            return out
         except Exception as e:
             logger.error(f"[MediaEngine] Download error: {e}")
             return None
 
     def _generate_placeholder(self, job_dir: str, segment_id: int, aspect_ratio: str) -> str:
-        """Creates a solid dark color placeholder video (last resort fallback)."""
-        import subprocess
-
+        """Creates a dark cinematic placeholder video (absolute last resort)."""
         w, h = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080)}.get(aspect_ratio, (1080, 1920))
-        output_path = str(Path(job_dir) / f"placeholder_{segment_id:03d}.mp4")
-
-        # Generate 10s dark charcoal placeholder
+        out = str(Path(job_dir) / f"placeholder_{segment_id:03d}.mp4")
         subprocess.run([
-            "ffmpeg",
-            "-f", "lavfi",
-            "-i", f"color=c=0x1a1a2e:s={w}x{h}:r=60",
-            "-t", "10",
-            "-c:v", "libx264",
-            output_path, "-y"
+            "ffmpeg", "-f", "lavfi",
+            "-i", f"color=c=0x1a1a2e:s={w}x{h}:r=30",
+            "-t", "10", "-c:v", "libx264",
+            out, "-y"
         ], capture_output=True, check=False)
-
-        logger.warning(f"[MediaEngine] Created placeholder: {output_path}")
-        return output_path
+        logger.warning(f"[MediaEngine] Placeholder created: {out}")
+        return out

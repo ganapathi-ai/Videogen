@@ -1,56 +1,58 @@
-# THE INNER CITADEL — Git Ignore
+# ══════════════════════════════════════════════
+#  THE INNER CITADEL — .gitignore
+#  IMPORTANT: .env is NEVER committed (has real API keys)
+# ══════════════════════════════════════════════
 
-# Dependencies
+# ── Environment (NEVER commit — contains real keys) ──
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ── Node / Next.js ───────────────────────────────────
 node_modules/
 .next/
+out/
+dist/
+build/
+npm-debug.log*
+
+# ── Python ────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-
-# Environment (NEVER commit real keys)
-.env
-.env.local
-.env.production
-
-# Generated outputs
-exports/
-cache/
-*.db
-*.sqlite
-
-# Logs
-*.log
-logs/
-
-# Build
-dist/
-build/
-.next/
-out/
-
-# Python environments
 venv/
 .venv/
 env/
+*.egg-info/
+.pytest_cache/
 
-# Media (generated)
+# ── Generated outputs (videos, audio, captions) ───────
+exports/
+backend/exports/
 *.wav
 *.mp4
 *.ass
-*.mp3
-*.jpg
-*.png
-backend/assets/bgm/*.mp3
+*.db
+*.sqlite
 
-# System
+# ── ML model cache ────────────────────────────────────
+.cache/
+backend/cache/
+*.pt
+*.bin
+huggingface/
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+logs/
+
+# ── System ────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Marker files
+# ── First-run marker ──────────────────────────────────
 backend/.deps_installed
-
-# Package lock (optional — remove if you want to track it)
-# package-lock.json

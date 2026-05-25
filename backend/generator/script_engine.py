@@ -125,7 +125,7 @@ class OpenRouterClient:
 
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.model   = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        self.model   = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
         self.base_url = "https://openrouter.ai/api/v1"
 
     def available(self) -> bool:
