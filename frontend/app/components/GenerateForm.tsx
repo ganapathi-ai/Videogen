@@ -88,6 +88,15 @@ export interface GenerateOptions {
 interface GenerateFormProps {
   onSubmit: (opts: GenerateOptions) => void;
   isGenerating: boolean;
+  channel: {
+    id: string;
+    name: string;
+    topics: string[];
+    default_voice: string;
+    default_aspect: string;
+    default_length: string;
+  };
+  accentColor: string;
 }
 
 const labelStyle: React.CSSProperties = {
@@ -99,12 +108,17 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 10,
 };
 
-export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormProps) {
+export default function GenerateForm({ onSubmit, isGenerating, channel, accentColor }: GenerateFormProps) {
+  const accent = accentColor || "#C4A064";
+
   const [topic,       setTopic]       = useState("");
-  const [length,      setLength]      = useState<LengthId>("short");
-  const [aspectRatio, setAspectRatio] = useState("9:16");
-  const [voice,       setVoice]       = useState("gb_ryan");
+  const [length,      setLength]      = useState<LengthId>((channel.default_length as LengthId) || "short");
+  const [aspectRatio, setAspectRatio] = useState(channel.default_aspect || "9:16");
+  const [voice,       setVoice]       = useState(channel.default_voice || "gb_ryan");
   const [voiceOpen,   setVoiceOpen]   = useState(false);
+
+  // Reset defaults when channel changes
+  // (handled by parent via key prop if needed)
 
   const selectedVoice = VOICE_GROUPS
     .flatMap(g => g.voices)
@@ -119,6 +133,9 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
     onSubmit({ topic: topic.trim(), length, aspect_ratio: aspectRatio, voice, fps: 30 });
   };
 
+  // Channel-specific topic chips (first 10)
+  const topicChips = (channel.topics || []).slice(0, 10);
+
   return (
     <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
@@ -130,10 +147,11 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
           fontSize: "0.75rem",
           letterSpacing: "0.15em",
           textTransform: "uppercase",
-          color: "var(--gold-primary)",
+          color: accent,
           marginBottom: 10,
+          transition: "color 0.4s ease",
         }}>
-          Stoic Topic or Concept
+          {channel.id === "tech" ? "Tech / AI Topic" : "Stoic Topic or Concept"}
         </label>
         <input
           id="topic-input"
@@ -141,7 +159,11 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
           type="text"
           value={topic}
           onChange={e => setTopic(e.target.value)}
-          placeholder="e.g. Overcoming Fear through Stoicism..."
+          placeholder={
+            channel.id === "tech"
+              ? "e.g. How AI Agents Are Changing Everything..."
+              : "e.g. Overcoming Fear through Stoicism..."
+          }
           maxLength={150}
           disabled={isGenerating}
           required
@@ -151,15 +173,39 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
         </p>
       </div>
 
-      {/* ── Quick Topics ── */}
+      {/* ── Quick Topics (channel-specific) ── */}
       <div>
         <p style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: 10, letterSpacing: "0.1em" }}>
-          QUICK SELECT
+          QUICK SELECT · {channel.name}
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-          {STOIC_TOPICS.map(t => (
-            <button key={t} type="button" className="topic-chip"
-              onClick={() => setTopic(t)} disabled={isGenerating}>
+          {topicChips.map(t => (
+            <button
+              key={t} type="button"
+              onClick={() => setTopic(t)}
+              disabled={isGenerating}
+              style={{
+                padding: "5px 12px",
+                borderRadius: 50,
+                border: `1px solid ${accent}35`,
+                background: `${accent}10`,
+                color: `${accent}cc`,
+                fontSize: "0.72rem",
+                cursor: isGenerating ? "not-allowed" : "pointer",
+                transition: "all 0.2s ease",
+                opacity: isGenerating ? 0.5 : 1,
+              }}
+              onMouseEnter={e => {
+                if (!isGenerating) {
+                  (e.target as HTMLElement).style.background = `${accent}22`;
+                  (e.target as HTMLElement).style.borderColor = `${accent}60`;
+                }
+              }}
+              onMouseLeave={e => {
+                (e.target as HTMLElement).style.background = `${accent}10`;
+                (e.target as HTMLElement).style.borderColor = `${accent}35`;
+              }}
+            >
               {t}
             </button>
           ))}
@@ -351,9 +397,22 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
       {/* ── Submit ── */}
       <button
         type="submit" id="generate-btn"
-        className="btn-gold"
         disabled={isGenerating || !topic.trim()}
-        style={{ width: "100%", fontSize: "1rem", padding: "18px" }}
+        style={{
+          width: "100%", fontSize: "1rem", padding: "18px",
+          border: "none", borderRadius: "var(--radius-md)",
+          background: isGenerating || !topic.trim()
+            ? "rgba(255,255,255,0.06)"
+            : `linear-gradient(135deg, ${accent}, ${accent}bb)`,
+          color: isGenerating || !topic.trim() ? "var(--text-muted)" : "#0d0d12",
+          fontWeight: 800, letterSpacing: "0.06em",
+          cursor: isGenerating || !topic.trim() ? "not-allowed" : "pointer",
+          transition: "all 0.3s ease",
+          boxShadow: isGenerating || !topic.trim() ? "none" : `0 4px 24px ${accent}40`,
+          fontFamily: "'Cinzel', serif",
+          display: "flex", alignItems: "center",
+          justifyContent: "center", gap: 10,
+        }}
       >
         {isGenerating ? (
           <>
@@ -371,7 +430,7 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
             <span>{isLongForm ? "🎬" : "⚡"}</span>
             {isLongForm
               ? `Generate Full ${selectedLength.duration} YouTube Video`
-              : "Generate Cinematic Short"}
+              : `Generate ${channel.id === "tech" ? "Tech" : "Cinematic"} Short`}
           </>
         )}
       </button>

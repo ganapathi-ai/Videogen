@@ -24,9 +24,11 @@ const PIPELINE_STEPS = [
 
 interface ProgressBarProps {
   progress: ProgressState;
+  accentColor?: string;
 }
 
-export default function ProgressBar({ progress }: ProgressBarProps) {
+export default function ProgressBar({ progress, accentColor }: ProgressBarProps) {
+  const accent = accentColor || "#C4A064";
   const { state, step, total, status } = progress;
   const pct = total > 0 ? Math.round((step / total) * 100) : 0;
 
@@ -39,8 +41,9 @@ export default function ProgressBar({ progress }: ProgressBarProps) {
           <h3 style={{
             fontFamily: "'Cinzel', serif",
             fontSize: "1rem",
-            color: state === "error" ? "var(--red-fail)" : "var(--gold-primary)",
-            letterSpacing: "0.08em",
+          color: state === "error" ? "var(--red-fail)" : accent,
+          letterSpacing: "0.08em",
+          transition: "color 0.4s ease",
           }}>
             {state === "running" ? "Pipeline Active" :
              state === "done"    ? "✓ Complete" :
@@ -66,7 +69,8 @@ export default function ProgressBar({ progress }: ProgressBarProps) {
             fontFamily: "'Cinzel', serif",
             fontSize: "1.5rem",
             fontWeight: 700,
-            color: "var(--gold-primary)",
+            color: accent,
+            transition: "color 0.4s ease",
           }}>
             {pct}%
           </div>
@@ -110,7 +114,7 @@ export default function ProgressBar({ progress }: ProgressBarProps) {
                   {s.label}
                 </div>
                 {isActive && (
-                  <div style={{ fontSize: "0.75rem", color: "var(--gold-dim)", marginTop: 2 }}>
+                  <div style={{ fontSize: "0.75rem", color: accent, opacity: 0.7, marginTop: 2 }}>
                     {s.hint}
                   </div>
                 )}
@@ -121,7 +125,7 @@ export default function ProgressBar({ progress }: ProgressBarProps) {
                 <div style={{
                   width: 16, height: 16,
                   border: "2px solid var(--border-subtle)",
-                  borderTopColor: "var(--gold-primary)",
+                  borderTopColor: accent,
                   borderRadius: "50%",
                   animation: "spin-slow 0.8s linear infinite",
                   flexShrink: 0,

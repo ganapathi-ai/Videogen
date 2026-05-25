@@ -56,8 +56,9 @@ class GenerateRequest(BaseModel):
     topic: str
     length: str = "short"          # short|medium|long_3|long_5|long_7|long_11
     aspect_ratio: str = "9:16"     # "9:16" | "16:9" | "1:1"
-    voice: str = "gb_ryan"         # Default: Ryan deep British (best for Stoic)
+    voice: str = "gb_ryan"         # Voice ID from /api/voices
     fps: int = 30                  # 30fps — smooth on CPU, standard for YouTube
+    channel: str = "stoic"         # "stoic" | "tech" (NeuralBaba Empire channels)
 
 # ─────────────────────────────────────────────
 # Progress Helper
@@ -74,8 +75,15 @@ def set_progress(job_id: str, step: int, status: str, total: int = 9):
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Inner Citadel API", "version": "2.0.0",
-            "mode": "CPU-only, no Redis/Celery"}
+    return {"status": "ok", "service": "NeuralBaba Empire API", "version": "3.0.0",
+            "channels": ["stoic", "tech"], "mode": "CPU-only, no Redis/Celery"}
+
+
+@app.get("/api/channels")
+async def get_channels():
+    """Returns all configured channels for the frontend."""
+    from channels.channel_config import get_all_channels
+    return {"channels": get_all_channels()}
 
 
 @app.post("/api/generate")
@@ -96,7 +104,8 @@ async def generate_video(req: GenerateRequest, background_tasks: BackgroundTasks
     # Run pipeline in background (non-blocking)
     background_tasks.add_task(
         run_pipeline, job_id, req.topic.strip(),
-        req.length, req.aspect_ratio, req.voice, req.fps
+        req.length, req.aspect_ratio, req.voice, req.fps,
+        req.channel
     )
 
     return {"job_id": job_id, "status": "queued",
@@ -202,7 +211,8 @@ async def health():
 # ─────────────────────────────────────────────
 
 async def run_pipeline(job_id: str, topic: str, length: str,
-                        aspect_ratio: str, voice: str, fps: int):
+                        aspect_ratio: str, voice: str, fps: int,
+                        channel: str = "stoic"):
     """
     Async wrapper — offloads blocking ML work to thread pool
     so the FastAPI event loop stays responsive.
@@ -213,7 +223,7 @@ async def run_pipeline(job_id: str, topic: str, length: str,
         try:
             await loop.run_in_executor(
                 pool,
-                lambda: _pipeline_sync(job_id, topic, length, aspect_ratio, voice, fps)
+                lambda: _pipeline_sync(job_id, topic, length, aspect_ratio, voice, fps, channel)
             )
         except Exception as e:
             logger.error(f"[{job_id[:8]}] Pipeline error: {e}")
@@ -221,10 +231,16 @@ async def run_pipeline(job_id: str, topic: str, length: str,
 
 
 def _pipeline_sync(job_id: str, topic: str, length: str,
-                   aspect_ratio: str, voice: str, fps: int):
+                   aspect_ratio: str, voice: str, fps: int,
+                   channel: str = "stoic"):
     """Synchronous pipeline — all 9 steps, CPU mode."""
     import json, sys
     sys.path.insert(0, str(Path(__file__).parent))
+
+    # Load channel config for watermark + metadata
+    from channels.channel_config import get_channel
+    channel_cfg  = get_channel(channel)
+    watermark    = channel_cfg.get("watermark", "NeuralBaba Empire")
 
     backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
     job_dir = EXPORTS_DIR / job_id
@@ -263,9 +279,9 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             used_beats.extend(entry.get("beats", []))
         used_beats = used_beats[-80:]       # Cap to last 80 beats
 
-        set_progress(job_id, 1, "✍️ Generating Stoic script (AI)...", total_steps)
+        set_progress(job_id, 1, f"✍️ Generating script (AI) for {channel_cfg['name']}...", total_steps)
         script = ScriptEngine().generate_script(
-            topic=topic, length=length, used_beats=used_beats
+            topic=topic, length=length, used_beats=used_beats, channel_id=channel
         )
 
         # Filter duplicate beats from this script
@@ -356,7 +372,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         video_duration = timeline.get("duration", 0.0)
         _ffmpeg_render(
             raw_video, mixed_audio, captions_path, final_video,
-            fps=fps, duration=video_duration
+            fps=fps, duration=video_duration, watermark=watermark
         )
 
         # Thumbnail
@@ -400,15 +416,23 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
 
 
 def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
-                   fps: int = 30, duration: float = 0.0):
+                   fps: int = 30, duration: float = 0.0,
+                   watermark: str = ""):
     """
-    Final FFmpeg render: mux video + mixed audio + burned-in captions.
+    Final FFmpeg render: mux video + mixed audio + captions + watermark.
 
-    KEY FIXES for long-form videos:
-      - NO -shortest flag: was cutting audio if video/audio lengths differed by ms
-      - Uses -t duration: precise output length from timeline (not guessed)
-      - Scaled timeout: 300s for shorts, 1800s for 11-min videos
-      - Thumbnail extracted at 20% through video (better than fixed 5s for long)
+    Watermark: Professional transparent text, bottom-center, 35% opacity.
+    Research basis: ByteByteGo, 3Blue1Brown, NetworkChuck style watermarks.
+      - Position: bottom-center (NOT bottom-right — captions are center, watermark above them)
+      - Opacity:  0.35 (35%) — visible but never distracts from content
+      - Color:    white with black 1px shadow — readable on any background
+      - Size:     ~1.8% of frame height (scales automatically)
+      - Timing:   always present throughout video
+
+    Long-form fixes:
+      - NO -shortest flag (was cutting audio prematurely)
+      - -t duration: precise output length from timeline
+      - Scaled timeout for 11+ min videos
     """
     import subprocess
 
@@ -418,36 +442,64 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
             p = p[0] + "\\:" + p[2:]
         return p
 
-    ass_path = _escape_ass_path(captions)
-
-    # Scale timeout: short videos need ~60s, 11-min needs ~1800s
+    ass_path  = _escape_ass_path(captions)
     timeout_s = max(300, int(duration * 2.5) + 120) if duration > 0 else 600
-
-    # Duration flag: use timeline duration if known, otherwise let FFmpeg decide
     dur_flags = ["-t", f"{duration:.3f}"] if duration > 0 else []
 
-    # Try with burned-in captions first
+    # ── Watermark drawtext filter ─────────────────────────────────
+    # Professional transparent watermark:
+    #   - Bottom-center, 80px above bottom (above captions, not covering them)
+    #   - White text, 35% opacity, 1px black shadow for legibility
+    #   - Font size = 1.8% of frame height (auto-scales for 9:16 vs 16:9)
+    #   - No box/background — clean transparent overlay
+    watermark_text = (watermark or "").replace("'", "\\'").replace(":", "\\:")
+    if watermark_text:
+        wm_filter = (
+            f"drawtext="
+            f"text='{watermark_text}':"
+            f"fontsize=ih*0.018:"           # 1.8% of frame height (scales per aspect ratio)
+            f"fontcolor=white@0.35:"        # White, 35% opacity — professional standard
+            f"x=(w-text_w)/2:"             # Horizontally centered
+            f"y=h-80:"                     # 80px from bottom (above caption area)
+            f"shadowx=1:shadowy=1:"        # 1px shadow for legibility on bright frames
+            f"shadowcolor=black@0.30:"     # Shadow at 30% opacity — subtle
+            f"font=Arial"                  # Clean sans-serif (standard on all OS)
+        )
+    else:
+        wm_filter = None
+
+    # ── Build vf filter chain: captions [+ watermark] ────────────
+    def build_vf(include_captions: bool) -> str:
+        filters = []
+        if include_captions:
+            filters.append(f"ass='{ass_path}'")
+        if wm_filter:
+            filters.append(wm_filter)
+        return ",".join(filters) if filters else "null"
+
+    # Try with captions + watermark
     r = subprocess.run([
         "ffmpeg",
         "-i", video,
         "-i", audio,
-        "-vf", f"ass='{ass_path}'",
+        "-vf", build_vf(include_captions=True),
         "-c:v", "libx264", "-preset", "fast",
         "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        # NO -shortest: prevents audio/video from being cut prematurely
         *dur_flags,
         out, "-y"
     ], capture_output=True, text=True, timeout=timeout_s)
 
     if r.returncode != 0:
-        logger.warning(f"Caption burn-in failed: {r.stderr[-200:]} — falling back")
-        # Fallback without captions (still no -shortest)
+        logger.warning(f"Caption+watermark render failed: {r.stderr[-200:]} — trying no captions")
+        # Fallback: watermark only (no captions)
+        vf_fallback = build_vf(include_captions=False)
         subprocess.run([
             "ffmpeg",
             "-i", video,
             "-i", audio,
+            "-vf", vf_fallback,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -460,16 +512,15 @@ def _extract_thumb(video: str, out: str):
     """Extracts thumbnail at 20% through video (better than fixed 5s for long videos)."""
     import subprocess
 
-    # First get video duration to extract at 20% mark
     try:
         probe = subprocess.run([
             "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video
         ], capture_output=True, text=True, timeout=10)
         import json
-        dur = float(json.loads(probe.stdout).get("format", {}).get("duration", 30.0))
-        thumb_t = max(3.0, dur * 0.20)  # 20% mark, minimum 3s
+        dur      = float(json.loads(probe.stdout).get("format", {}).get("duration", 30.0))
+        thumb_t  = max(3.0, dur * 0.20)  # 20% mark, minimum 3s
     except Exception:
-        thumb_t = 5.0
+        thumb_t  = 5.0
 
     subprocess.run([
         "ffmpeg", "-i", video,

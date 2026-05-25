@@ -98,6 +98,15 @@ CRITICAL RULES — follow every single one:
 9. Each beat must be COMPLETELY UNIQUE — never repeat the same idea twice.
 10. Build emotional arc: start tense → go deeper → resolve powerfully."""
 
+# ── Channel-aware system prompt ───────────────────────────────────
+def _get_system_prompt(channel_id: str = "stoic") -> str:
+    """Returns the channel-specific system prompt."""
+    try:
+        from channels.channel_config import get_channel
+        return get_channel(channel_id)["system_prompt"]
+    except Exception:
+        return SYSTEM_PROMPT  # fallback
+
 
 def _short_form_prompt(topic: str, duration_target: int, num_beats: int,
                         used_beats: list = None) -> str:
@@ -317,14 +326,15 @@ class ScriptEngine:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def generate_script(self, topic: str, length: str = "short",
-                         used_beats: list = None) -> dict:
+                         used_beats: list = None, channel_id: str = "stoic") -> dict:
         """
-        Generates a Stoic video script.
+        Generates a video script for the specified channel.
 
         Args:
-            topic:      e.g. "Overcoming Fear"
+            topic:      e.g. "Overcoming Fear" or "How AI Agents Work"
             length:     "short" | "medium" | "long_3" | "long_5" | "long_7" | "long_11"
             used_beats: Beat texts from history (to avoid repetition)
+            channel_id: "stoic" | "tech"
 
         Returns:
             dict: Validated script with title, beats, visual_keywords
@@ -334,25 +344,32 @@ class ScriptEngine:
         duration_s   = cfg["target_s"]
         total_beats  = cfg["beats"]
 
+        # Load channel system prompt
+        system_prompt = _get_system_prompt(channel_id)
+
         logger.info(
-            f"[ScriptEngine] Generating '{topic}' | {cfg['label']} "
+            f"[ScriptEngine] channel={channel_id} | '{topic}' | {cfg['label']} "
             f"| {total_beats} beats | {duration_s}s target"
         )
 
         if video_type == "short":
-            return self._generate_short(topic, duration_s, total_beats, used_beats)
+            return self._generate_short(topic, duration_s, total_beats, used_beats,
+                                        system_prompt=system_prompt)
         else:
-            return self._generate_long(topic, duration_s, total_beats, length, used_beats)
+            return self._generate_long(topic, duration_s, total_beats, length, used_beats,
+                                       system_prompt=system_prompt)
 
     # ─────────────────────────────────────────────
     # Short-Form (Shorts / Reels)
     # ─────────────────────────────────────────────
 
     def _generate_short(self, topic: str, duration_s: int,
-                          num_beats: int, used_beats: list) -> dict:
+                          num_beats: int, used_beats: list,
+                          system_prompt: str = None) -> dict:
         """Single LLM call for short-form content."""
         prompt = _short_form_prompt(topic, duration_s, num_beats, used_beats)
-        raw    = self._call_with_fallback(SYSTEM_PROMPT, prompt, max_tokens=2048)
+        sys_p  = system_prompt or SYSTEM_PROMPT
+        raw    = self._call_with_fallback(sys_p, prompt, max_tokens=2048)
         return self._parse_and_validate(raw, topic, duration_s)
 
     # ─────────────────────────────────────────────
@@ -361,7 +378,7 @@ class ScriptEngine:
 
     def _generate_long(self, topic: str, duration_s: int,
                          total_beats: int, length: str,
-                         used_beats: list) -> dict:
+                         used_beats: list, system_prompt: str = None) -> dict:
         """
         Multi-call generation for long-form videos.
 
@@ -402,7 +419,7 @@ class ScriptEngine:
             )
 
             raw = self._call_with_fallback(
-                SYSTEM_PROMPT, prompt,
+                system_prompt or SYSTEM_PROMPT, prompt,
                 max_tokens=min(4096, chapter_beats * 120),
             )
             chapter_data = self._parse_and_validate(raw, topic, duration_s)

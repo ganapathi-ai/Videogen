@@ -9,45 +9,111 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:800
 
 type AppState = "idle" | "generating" | "done" | "error";
 
+export interface ChannelInfo {
+  id: string;
+  name: string;
+  handle: string;
+  tagline: string;
+  description: string;
+  emoji: string;
+  accent_color: string;
+  topics: string[];
+  seo_tags: string[];
+  default_voice: string;
+  default_aspect: string;
+  default_length: string;
+}
+
+// ── Hardcoded fallback channels (if backend /api/channels unreachable)
+const DEFAULT_CHANNELS: ChannelInfo[] = [
+  {
+    id: "stoic",
+    name: "The Inner Citadel",
+    handle: "@TheInnerCitadel",
+    tagline: "Ancient Wisdom. Modern Clarity.",
+    description: "Stoic philosophy for daily life — discipline, resilience, mindset.",
+    emoji: "🏛️",
+    accent_color: "#C4A064",
+    default_voice: "gb_ryan",
+    default_aspect: "9:16",
+    default_length: "short",
+    seo_tags: ["stoicism", "philosophy", "discipline", "mindset"],
+    topics: [
+      "Overcoming Fear Through Stoicism", "The Obstacle is the Way",
+      "Ego is the Enemy", "Discipline is Freedom", "Memento Mori",
+      "Amor Fati — Love Your Fate", "The Dichotomy of Control",
+      "Stillness is the Key", "Why Stoics Never Complain",
+      "The Art of Not Reacting",
+    ],
+  },
+  {
+    id: "tech",
+    name: "neuralbaba_empire",
+    handle: "@neuralbaba_empire",
+    tagline: "The Future is Already Here.",
+    description: "AI, technology and data science — explained for everyone.",
+    emoji: "💻",
+    accent_color: "#00D4FF",
+    default_voice: "us_christopher",
+    default_aspect: "9:16",
+    default_length: "short",
+    seo_tags: ["AI", "machine learning", "tech", "programming"],
+    topics: [
+      "AI is Changing Everything Right Now", "How ChatGPT Actually Works Inside",
+      "Why Python Won the Data Science War", "The Rise of AI Agents",
+      "Why 90 Percent of AI Projects Fail", "How Netflix Recommends Your Next Show",
+      "The Truth About AI Consciousness", "The Future of Work in the Age of AI",
+      "The Mindset of a 10x Engineer", "The Dark Side of Social Media Algorithms",
+    ],
+  },
+];
+
 export default function HomePage() {
-  const [appState, setAppState]   = useState<AppState>("idle");
-  const [taskId,   setTaskId]     = useState<string | null>(null);
-  const [progress, setProgress]   = useState<ProgressState>({
+  const [appState, setAppState]     = useState<AppState>("idle");
+  const [taskId, setTaskId]         = useState<string | null>(null);
+  const [progress, setProgress]     = useState<ProgressState>({
     state: "idle", step: 0, total: 9, status: "",
   });
-  const [result, setResult]       = useState<{
+  const [result, setResult]         = useState<{
     video_url: string; captions_url: string; timeline_url: string;
     title: string; duration: number;
   } | null>(null);
-  const [error, setError]         = useState<string | null>(null);
+  const [error, setError]           = useState<string | null>(null);
+  const [channels, setChannels]     = useState<ChannelInfo[]>(DEFAULT_CHANNELS);
+  const [activeChannel, setActiveChannel] = useState<ChannelInfo>(DEFAULT_CHANNELS[0]);
 
-  // ── SSE Progress Stream ────────────────────────────────────
+  // ── Load channels from backend ───────────────────────────────
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/channels`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.channels?.length) {
+          setChannels(data.channels);
+          setActiveChannel(data.channels[0]);
+        }
+      })
+      .catch(() => { /* use defaults */ });
+  }, []);
+
+  // ── SSE Progress Stream ──────────────────────────────────────
   const startSSEStream = useCallback((tid: string) => {
-    const url = `${BACKEND_URL}/api/stream-progress/${tid}`;
-    const evtSource = new EventSource(url);
-
+    const evtSource = new EventSource(`${BACKEND_URL}/api/stream-progress/${tid}`);
     evtSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        const newProgress: ProgressState = {
-          state:        data.state || "running",
-          step:         data.step  ?? 0,
-          total:        data.total ?? 9,
-          status:       data.status || "",
-          video_url:    data.video_url,
-          captions_url: data.captions_url,
+        setProgress({
+          state: data.state || "running", step: data.step ?? 0,
+          total: data.total ?? 9, status: data.status || "",
+          video_url: data.video_url, captions_url: data.captions_url,
           timeline_url: data.timeline_url,
-        };
-        setProgress(newProgress);
-
+        });
         if (data.state === "done") {
           evtSource.close();
           setResult({
-            video_url:    data.video_url    || "",
-            captions_url: data.captions_url || "",
+            video_url: data.video_url || "", captions_url: data.captions_url || "",
             timeline_url: data.timeline_url || "",
-            title:        data.title        || "Inner Citadel Video",
-            duration:     data.duration     || 0,
+            title: data.title || activeChannel.name,
+            duration: data.duration || 0,
           });
           setAppState("done");
         } else if (data.state === "error" || data.state === "closed") {
@@ -55,41 +121,26 @@ export default function HomePage() {
           setError(data.status || "An unknown error occurred.");
           setAppState("error");
         }
-      } catch {
-        // ignore parse errors
-      }
+      } catch { /* ignore parse errors */ }
     };
-
-    evtSource.onerror = () => {
-      evtSource.close();
-      // Fallback: poll the status endpoint
-      pollFallback(tid);
-    };
-
+    evtSource.onerror = () => { evtSource.close(); pollFallback(tid); };
     return evtSource;
-  }, []);
+  }, [activeChannel]);
 
-  // ── Polling Fallback (if SSE fails) ───────────────────────
   const pollFallback = async (tid: string) => {
     let attempts = 0;
     const interval = setInterval(async () => {
-      attempts++;
-      if (attempts > 600) { clearInterval(interval); return; } // 10 min max
-
+      if (++attempts > 600) { clearInterval(interval); return; }
       try {
         const r = await fetch(`${BACKEND_URL}/api/status/${tid}`);
         const data = await r.json();
-
         if (data.status === "done") {
           clearInterval(interval);
-          const res = await fetch(`${BACKEND_URL}/api/result/${tid}`);
-          const rd  = await res.json();
+          const rd = await (await fetch(`${BACKEND_URL}/api/result/${tid}`)).json();
           setResult({
-            video_url:    rd.video_url    || "",
-            captions_url: rd.captions_url || "",
+            video_url: rd.video_url || "", captions_url: rd.captions_url || "",
             timeline_url: rd.timeline_url || "",
-            title:        rd.title        || "Inner Citadel",
-            duration:     rd.duration     || 0,
+            title: rd.title || activeChannel.name, duration: rd.duration || 0,
           });
           setAppState("done");
         } else if (data.status === "failed") {
@@ -99,118 +150,212 @@ export default function HomePage() {
         } else {
           setProgress(p => ({ ...p, status: data.message || "Processing..." }));
         }
-      } catch {
-        // continue polling
-      }
+      } catch { /* continue polling */ }
     }, 2000);
   };
 
-  // ── Submit Handler ─────────────────────────────────────────
+  // ── Submit Handler ───────────────────────────────────────────
   const handleGenerate = async (opts: GenerateOptions) => {
-    setError(null);
-    setResult(null);
+    setError(null); setResult(null);
     setAppState("generating");
-    setProgress({ state: "running", step: 0, total: 9, status: "Sending request to pipeline..." });
-
+    setProgress({ state: "running", step: 0, total: 9, status: "Sending to pipeline..." });
     try {
       const resp = await fetch(`${BACKEND_URL}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(opts),
+        body: JSON.stringify({ ...opts, channel: activeChannel.id }),
       });
-
       if (!resp.ok) {
         const err = await resp.json();
         throw new Error(err.detail || "Failed to start generation");
       }
-
-      const { job_id } = await resp.json();   // backend returns job_id
+      const { job_id } = await resp.json();
       setTaskId(job_id);
       startSSEStream(job_id);
-
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Connection failed";
-      setError(msg);
+      setError(err instanceof Error ? err.message : "Connection failed");
       setAppState("error");
     }
   };
 
   const handleReset = () => {
-    setAppState("idle");
-    setTaskId(null);
+    setAppState("idle"); setTaskId(null);
     setProgress({ state: "idle", step: 0, total: 9, status: "" });
-    setResult(null);
-    setError(null);
+    setResult(null); setError(null);
   };
 
-  // ── Render ─────────────────────────────────────────────────
+  // ── Channel accent vars ──────────────────────────────────────
+  const accent     = activeChannel.accent_color;
+  const isTech     = activeChannel.id === "tech";
+  const accentGlow = isTech
+    ? "rgba(0,212,255,0.08)"
+    : "rgba(196,160,100,0.08)";
+  const accentBorder = isTech
+    ? "rgba(0,212,255,0.25)"
+    : "rgba(196,160,100,0.25)";
+
+  // ── Render ────────────────────────────────────────────────────
   return (
     <>
-      {/* ── Ambient Orbs ── */}
-      <div className="orb orb-gold" style={{ top: "-10%", left: "50%", transform: "translateX(-50%)" }} aria-hidden />
-      <div className="orb orb-blue" style={{ bottom: "10%", right: "5%" }} aria-hidden />
+      {/* ── Ambient Orbs (color shifts per channel) ── */}
+      <div className="orb" style={{
+        width: 600, height: 600,
+        background: `radial-gradient(circle, ${accent}18 0%, transparent 70%)`,
+        top: "-15%", left: "50%", transform: "translateX(-50%)",
+        position: "fixed", pointerEvents: "none", zIndex: 0,
+        transition: "background 0.6s ease",
+      }} aria-hidden />
+      <div className="orb orb-blue" style={{
+        background: `radial-gradient(circle, ${accent}12 0%, transparent 70%)`,
+        bottom: "10%", right: "5%",
+        transition: "background 0.6s ease",
+      }} aria-hidden />
 
       <main style={{ minHeight: "100vh", position: "relative", zIndex: 1 }}>
 
-        {/* ── Header / Hero ── */}
-        <header style={{ paddingTop: "72px", paddingBottom: "48px", textAlign: "center" }}>
+        {/* ── Header ─────────────────────────────────────────────── */}
+        <header style={{ paddingTop: 64, paddingBottom: 32, textAlign: "center" }}>
           <div className="container">
 
-            {/* Channel badge */}
+            {/* Platform badge */}
             <div style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "6px 18px",
-              border: "1px solid var(--border-gold)",
-              borderRadius: "50px",
-              marginBottom: 28,
-              fontSize: "0.72rem",
-              letterSpacing: "0.18em",
-              color: "var(--gold-primary)",
-              textTransform: "uppercase",
-              background: "var(--gold-glow)",
+              display: "inline-flex", alignItems: "center", gap: 8,
+              padding: "5px 16px",
+              border: `1px solid ${accentBorder}`,
+              borderRadius: 50, marginBottom: 32,
+              fontSize: "0.70rem", letterSpacing: "0.18em",
+              color: accent, textTransform: "uppercase",
+              background: accentGlow,
+              transition: "all 0.4s ease",
             }}>
-              <span>⚡</span> Autonomous Pipeline · 100% Free · Open Source
+              <span>⚡</span> NeuralBaba Empire · Autonomous Video Pipeline
             </div>
 
-            {/* Main title */}
-            <h1 style={{
-              fontFamily: "'Cinzel', serif",
-              fontSize: "clamp(2.4rem, 5vw, 4.5rem)",
-              fontWeight: 900,
-              lineHeight: 1.1,
-              letterSpacing: "0.06em",
-              marginBottom: 20,
+            {/* ── Channel Selector Tabs ── */}
+            <div style={{
+              display: "inline-flex",
+              gap: 4,
+              padding: 4,
+              background: "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 16,
+              marginBottom: 32,
             }}>
-              <span className="text-gold">THE INNER</span>
-              <br />
-              <span style={{ color: "var(--text-primary)" }}>CITADEL</span>
-            </h1>
+              {channels.map(ch => {
+                const isActive = ch.id === activeChannel.id;
+                const chAccent = ch.accent_color;
+                return (
+                  <button
+                    key={ch.id}
+                    id={`channel-tab-${ch.id}`}
+                    onClick={() => {
+                      if (appState === "idle") setActiveChannel(ch);
+                    }}
+                    disabled={appState !== "idle"}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      padding: "12px 24px",
+                      borderRadius: 12,
+                      border: isActive
+                        ? `1px solid ${chAccent}50`
+                        : "1px solid transparent",
+                      background: isActive
+                        ? `linear-gradient(135deg, ${chAccent}18, ${chAccent}08)`
+                        : "transparent",
+                      cursor: appState !== "idle" ? "not-allowed" : "pointer",
+                      transition: "all 0.3s ease",
+                      opacity: appState !== "idle" && !isActive ? 0.4 : 1,
+                    }}
+                  >
+                    <span style={{ fontSize: "1.3rem" }}>{ch.emoji}</span>
+                    <div style={{ textAlign: "left" }}>
+                      <div style={{
+                        fontSize: "0.88rem",
+                        fontWeight: 700,
+                        color: isActive ? chAccent : "var(--text-secondary)",
+                        transition: "color 0.3s ease",
+                        letterSpacing: "0.01em",
+                      }}>
+                        {ch.name}
+                      </div>
+                      <div style={{
+                        fontSize: "0.68rem",
+                        color: isActive ? `${chAccent}cc` : "var(--text-muted)",
+                        letterSpacing: "0.05em",
+                        transition: "color 0.3s ease",
+                      }}>
+                        {ch.handle}
+                      </div>
+                    </div>
+                    {isActive && (
+                      <div style={{
+                        width: 6, height: 6, borderRadius: "50%",
+                        background: chAccent,
+                        boxShadow: `0 0 8px ${chAccent}`,
+                        animation: "pulse 2s infinite",
+                      }} />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
 
+            {/* Channel tagline */}
+            <div style={{ marginBottom: 8 }}>
+              <span style={{
+                fontSize: "clamp(0.8rem, 1.5vw, 1rem)",
+                color: "var(--text-secondary)",
+                letterSpacing: "0.06em",
+                transition: "all 0.4s ease",
+              }}>
+                {activeChannel.tagline}
+              </span>
+            </div>
+
+            {/* Channel description */}
             <p style={{
-              fontSize: "clamp(1rem, 2vw, 1.2rem)",
-              color: "var(--text-secondary)",
-              maxWidth: 560,
-              margin: "0 auto 16px",
-              lineHeight: 1.7,
+              fontSize: "0.82rem",
+              color: "var(--text-muted)",
+              maxWidth: 480,
+              margin: "0 auto 28px",
+              lineHeight: 1.6,
             }}>
-              Generate cinematic Stoic philosophy videos autonomously.
-              Script → Voice → Alignment → Footage → Subtitles → Render.
+              {activeChannel.description}
             </p>
 
+            {/* Watermark preview badge */}
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "4px 12px",
+              border: `1px solid ${accentBorder}`,
+              borderRadius: 6,
+              fontSize: "0.68rem",
+              color: `${accent}99`,
+              background: accentGlow,
+              letterSpacing: "0.05em",
+              marginBottom: 8,
+            }}>
+              <span style={{ opacity: 0.6 }}>🔖</span>
+              Watermark: <strong style={{ color: accent, opacity: 0.7 }}>
+                {activeChannel.name}
+              </strong>
+            </div>
+
             {/* Feature pills */}
-            <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 10, marginTop: 24 }}>
+            <div style={{
+              display: "flex", flexWrap: "wrap",
+              justifyContent: "center", gap: 8, marginTop: 20,
+            }}>
               {[
                 "Groq AI Script", "Edge-TTS Voice", "WhisperX Align",
-                "Ken Burns Video", "Karaoke Subtitles", "60fps H.264",
+                "Ken Burns Video", "Karaoke Subtitles", "Transparent Watermark",
               ].map(f => (
                 <span key={f} style={{
-                  padding: "5px 14px",
+                  padding: "4px 12px",
                   background: "var(--bg-glass)",
                   border: "1px solid var(--border-subtle)",
-                  borderRadius: "50px",
-                  fontSize: "0.75rem",
+                  borderRadius: 50,
+                  fontSize: "0.72rem",
                   color: "var(--text-secondary)",
                 }}>
                   {f}
@@ -220,22 +365,26 @@ export default function HomePage() {
           </div>
         </header>
 
-        {/* ── Gold Divider ── */}
+        {/* ── Gold/Cyan Divider (color per channel) ── */}
         <div className="container">
-          <div className="gold-divider" />
+          <div style={{
+            height: 1,
+            background: `linear-gradient(to right, transparent, ${accent}40, transparent)`,
+            margin: "4px 0 40px",
+            transition: "background 0.5s ease",
+          }} />
         </div>
 
-        {/* ── Main Content ── */}
-        <section style={{ padding: "48px 0 80px" }}>
+        {/* ── Main Content ─────────────────────────────────────── */}
+        <section style={{ padding: "0 0 80px" }}>
           <div className="container">
             <div style={{
               display: "grid",
-              gridTemplateColumns: "minmax(0, 1.1fr) minmax(0, 0.9fr)",
-              gap: 40,
-              alignItems: "start",
+              gridTemplateColumns: "minmax(0,1.1fr) minmax(0,0.9fr)",
+              gap: 40, alignItems: "start",
             }}>
 
-              {/* LEFT: Generate Form or Result */}
+              {/* LEFT: Form or Result */}
               <div>
                 {appState === "done" && result ? (
                   <ResultCard
@@ -247,37 +396,40 @@ export default function HomePage() {
                     onReset={handleReset}
                   />
                 ) : (
-                  <div className="glass-card" style={{ padding: "36px" }}>
-                    <div style={{ marginBottom: 28 }}>
+                  <div className="glass-card" style={{ padding: 36 }}>
+                    <div style={{ marginBottom: 24 }}>
                       <h2 style={{
                         fontFamily: "'Cinzel', serif",
-                        fontSize: "1.1rem",
+                        fontSize: "1.05rem",
                         letterSpacing: "0.08em",
-                        color: "var(--text-primary)",
+                        color: accent,
                         marginBottom: 6,
+                        transition: "color 0.4s ease",
                       }}>
-                        Configure Your Video
+                        {activeChannel.emoji} Configure {activeChannel.name} Video
                       </h2>
-                      <p style={{ fontSize: "0.83rem", color: "var(--text-muted)" }}>
-                        All fields pre-seeded with optimal Stoic defaults
+                      <p style={{ fontSize: "0.80rem", color: "var(--text-muted)" }}>
+                        Channel: <strong style={{ color: `${accent}cc` }}>
+                          {activeChannel.handle}
+                        </strong>
+                        {" · "}Watermark burned on render
                       </p>
                     </div>
 
                     <GenerateForm
                       onSubmit={handleGenerate}
                       isGenerating={appState === "generating"}
+                      channel={activeChannel}
+                      accentColor={accent}
                     />
 
-                    {/* Error display */}
                     {appState === "error" && error && (
                       <div style={{
-                        marginTop: 20,
-                        padding: "14px 18px",
+                        marginTop: 20, padding: "14px 18px",
                         background: "rgba(239,68,68,0.08)",
                         border: "1px solid rgba(239,68,68,0.25)",
                         borderRadius: "var(--radius-md)",
-                        fontSize: "0.85rem",
-                        color: "var(--red-fail)",
+                        fontSize: "0.85rem", color: "var(--red-fail)",
                       }}>
                         <strong>Error:</strong> {error}
                         <br />
@@ -293,119 +445,119 @@ export default function HomePage() {
               {/* RIGHT: Progress / Info Panel */}
               <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
-                {/* Progress Panel (visible during generation) */}
-                {(appState === "generating") && (
-                  <div className="glass-card" style={{ padding: "32px" }}>
+                {appState === "generating" && (
+                  <div className="glass-card" style={{ padding: 32 }}>
                     <h2 style={{
                       fontFamily: "'Cinzel', serif",
-                      fontSize: "0.9rem",
+                      fontSize: "0.88rem",
                       letterSpacing: "0.12em",
-                      color: "var(--gold-primary)",
+                      color: accent,
                       textTransform: "uppercase",
                       marginBottom: 24,
+                      transition: "color 0.4s ease",
                     }}>
                       Pipeline Progress
                     </h2>
-                    <ProgressBar progress={progress} />
+                    <ProgressBar progress={progress} accentColor={accent} />
                   </div>
                 )}
 
-                {/* Architecture Info Panel */}
                 {appState === "idle" && (
-                  <div className="glass-card" style={{ padding: "28px" }}>
-                    <h3 style={{
-                      fontFamily: "'Cinzel', serif",
-                      fontSize: "0.85rem",
-                      letterSpacing: "0.12em",
-                      color: "var(--gold-primary)",
-                      textTransform: "uppercase",
-                      marginBottom: 20,
-                    }}>
-                      9-Step Autonomous Pipeline
-                    </h3>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                      {[
-                        { n: "1", label: "Script",     desc: "Gemini AI → Stoic narrative JSON" },
-                        { n: "2", label: "Voice",      desc: "Kokoro-82M offline TTS synthesis" },
-                        { n: "3", label: "Align",      desc: "WhisperX word-level timestamps"  },
-                        { n: "4", label: "Timeline",   desc: "Master sync document assembled"  },
-                        { n: "5", label: "Footage",    desc: "Pexels/Pixabay + FAISS matching" },
-                        { n: "6", label: "Video",      desc: "PIL LANCZOS Ken Burns composit"  },
-                        { n: "7", label: "Captions",   desc: "pysubs2 ASS karaoke subtitles"  },
-                        { n: "8", label: "Audio Mix",  desc: "Emotion-based BGM ducking"       },
-                        { n: "9", label: "Render",     desc: "FFmpeg H.264 + quality gates"    },
-                      ].map(s => (
-                        <div key={s.n} style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                          <div style={{
-                            width: 28, height: 28,
-                            borderRadius: "50%",
-                            background: "var(--gold-glow)",
-                            border: "1px solid var(--border-gold)",
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            fontSize: "0.72rem",
-                            color: "var(--gold-primary)",
-                            fontWeight: 700,
-                            flexShrink: 0,
-                          }}>
-                            {s.n}
-                          </div>
-                          <div>
-                            <span style={{ fontSize: "0.82rem", color: "var(--text-primary)", fontWeight: 600 }}>
-                              {s.label}
-                            </span>
-                            <span style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginLeft: 8 }}>
-                              {s.desc}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Tech Stack Card */}
-                <div className="glass-card" style={{ padding: "24px 28px" }}>
-                  <h3 style={{
-                    fontFamily: "'Cinzel', serif",
-                    fontSize: "0.75rem",
-                    letterSpacing: "0.15em",
-                    color: "var(--text-muted)",
-                    textTransform: "uppercase",
-                    marginBottom: 16,
-                  }}>
-                    Technology Stack
-                  </h3>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    {[
-                      { icon: "🤖", tech: "Gemini 1.5 Flash",   cost: "Free API"  },
-                      { icon: "🎙️", tech: "Kokoro-82M",         cost: "Offline"   },
-                      { icon: "🔬", tech: "WhisperX",           cost: "Open"      },
-                      { icon: "🎬", tech: "MoviePy + FFmpeg",   cost: "Free"      },
-                      { icon: "💬", tech: "pysubs2 ASS",        cost: "Open"      },
-                      { icon: "🔍", tech: "FAISS + ST",         cost: "Free"      },
-                    ].map(t => (
-                      <div key={t.tech} style={{
-                        padding: "10px 12px",
-                        background: "var(--bg-elevated)",
-                        borderRadius: "var(--radius-sm)",
-                        border: "1px solid var(--border-subtle)",
+                  <>
+                    {/* Pipeline steps */}
+                    <div className="glass-card" style={{ padding: 28 }}>
+                      <h3 style={{
+                        fontFamily: "'Cinzel', serif",
+                        fontSize: "0.82rem",
+                        letterSpacing: "0.12em",
+                        color: accent,
+                        textTransform: "uppercase",
+                        marginBottom: 18,
+                        transition: "color 0.4s ease",
                       }}>
-                        <div style={{ fontSize: "0.85rem" }}>{t.icon} <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>{t.tech}</span></div>
-                        <div style={{ fontSize: "0.72rem", color: "var(--green-ok)", marginTop: 3 }}>{t.cost}</div>
+                        9-Step Autonomous Pipeline
+                      </h3>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                        {[
+                          { n: "1", label: "Script",     desc: "Groq AI → channel-specific narrative" },
+                          { n: "2", label: "Voice",      desc: "Edge-TTS deep voice synthesis" },
+                          { n: "3", label: "Align",      desc: "WhisperX word-level timestamps" },
+                          { n: "4", label: "Timeline",   desc: "Master sync document assembled" },
+                          { n: "5", label: "Footage",    desc: "Pexels/Pixabay + FAISS matching" },
+                          { n: "6", label: "Video",      desc: "PIL LANCZOS Ken Burns composite" },
+                          { n: "7", label: "Captions",   desc: "pysubs2 ASS karaoke subtitles" },
+                          { n: "8", label: "Audio Mix",  desc: "Emotion-based BGM ducking" },
+                          { n: "9", label: "Render",     desc: `FFmpeg + ${activeChannel.name} watermark` },
+                        ].map(s => (
+                          <div key={s.n} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <div style={{
+                              width: 26, height: 26, borderRadius: "50%",
+                              background: `${accent}15`,
+                              border: `1px solid ${accent}40`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: "0.70rem", color: accent, fontWeight: 700,
+                              flexShrink: 0, transition: "all 0.4s ease",
+                            }}>
+                              {s.n}
+                            </div>
+                            <div>
+                              <span style={{ fontSize: "0.80rem", color: "var(--text-primary)", fontWeight: 600 }}>
+                                {s.label}
+                              </span>
+                              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: 8 }}>
+                                {s.desc}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </div>
+                    </div>
+
+                    {/* Channel SEO Tags */}
+                    <div className="glass-card" style={{ padding: "20px 24px" }}>
+                      <h3 style={{
+                        fontFamily: "'Cinzel', serif",
+                        fontSize: "0.72rem",
+                        letterSpacing: "0.15em",
+                        color: "var(--text-muted)",
+                        textTransform: "uppercase",
+                        marginBottom: 12,
+                      }}>
+                        SEO Tags · {activeChannel.name}
+                      </h3>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {activeChannel.seo_tags.slice(0, 12).map(tag => (
+                          <span key={tag} style={{
+                            padding: "3px 10px",
+                            background: `${accent}10`,
+                            border: `1px solid ${accent}25`,
+                            borderRadius: 50,
+                            fontSize: "0.68rem",
+                            color: `${accent}cc`,
+                            transition: "all 0.4s ease",
+                          }}>
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
 
                 {/* Cost counter */}
                 <div style={{
                   padding: "16px 24px",
-                  border: "1px solid var(--border-gold)",
+                  border: `1px solid ${accentBorder}`,
                   borderRadius: "var(--radius-md)",
-                  background: "var(--gold-glow)",
+                  background: accentGlow,
                   textAlign: "center",
+                  transition: "all 0.4s ease",
                 }}>
-                  <div style={{ fontSize: "2rem", fontWeight: 900, color: "var(--gold-primary)", fontFamily: "'Cinzel', serif" }}>
+                  <div style={{
+                    fontSize: "2rem", fontWeight: 900, color: accent,
+                    fontFamily: "'Cinzel', serif",
+                    transition: "color 0.4s ease",
+                  }}>
                     $0.00
                   </div>
                   <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", marginTop: 4 }}>
@@ -417,28 +569,28 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ── Footer ── */}
+        {/* ── Footer ───────────────────────────────────────────── */}
         <footer style={{
           borderTop: "1px solid var(--border-subtle)",
-          padding: "28px 0",
-          textAlign: "center",
+          padding: "24px 0", textAlign: "center",
         }}>
           <div className="container">
-            <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-              THE INNER CITADEL — Autonomous Stoic Video Pipeline ·{" "}
-              <span style={{ color: "var(--gold-dim)" }}>100% Open Source</span>
-              {" · "}
-              <a href="https://github.com" target="_blank" rel="noopener noreferrer"
-                style={{ color: "var(--text-muted)", textDecoration: "none" }}>
-                GitHub
-              </a>
+            <p style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+              <strong style={{ color: accent }}>NeuralBaba Empire</strong>
+              {" · "}The Inner Citadel &amp; neuralbaba_empire{" · "}
+              <span style={{ color: "var(--text-muted)", opacity: 0.7 }}>
+                Autonomous Video Pipeline · 100% Free · Open Source
+              </span>
             </p>
           </div>
         </footer>
       </main>
 
-      {/* ── Responsive styles ── */}
       <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.6; transform: scale(0.85); }
+        }
         @media (max-width: 768px) {
           section > div.container > div {
             grid-template-columns: 1fr !important;
