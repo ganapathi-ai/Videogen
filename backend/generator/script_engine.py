@@ -161,7 +161,9 @@ class OpenRouterClient:
 
 
 class GeminiClient:
-    """Google Gemini API — 1M tokens/day free. Last resort fallback."""
+    """Google Gemini API — 1M tokens/day free. Last resort fallback.
+    Uses google-genai SDK (replaces deprecated google-generativeai).
+    """
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "")
@@ -171,20 +173,21 @@ class GeminiClient:
         return bool(self.api_key and self.api_key != "YOUR_GEMINI_KEY_HERE")
 
     def generate(self, system: str, user: str) -> str:
-        import google.generativeai as genai
-        genai.configure(api_key=self.api_key)
-        m = genai.GenerativeModel(
-            model_name=self.model,
-            system_instruction=system,
-        )
-        resp = m.generate_content(
-            user,
-            generation_config=genai.GenerationConfig(
+        # google-genai SDK (google-generativeai reached EOL Nov 2025)
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key)
+        response = client.models.generate_content(
+            model=self.model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
                 temperature=0.75,
                 response_mime_type="application/json",
-            )
+            ),
         )
-        return resp.text
+        return response.text
 
 
 # ─────────────────────────────────────────────────────────────────
