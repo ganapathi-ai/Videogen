@@ -1,190 +1,194 @@
 """
-THE INNER CITADEL — TTS Engine (edge-tts, Microsoft Neural)
-15 curated voices from 8 countries. Natural prosody settings.
-Python 3.13 compatible, no GPU, no system deps, internet required.
+THE INNER CITADEL — TTS Engine (edge-tts + FFmpeg Philosophy Voice Chain)
+
+Targets the sound of top Stoic philosophy YouTube channels:
+  Daily Stoic, Einzelgänger, Philosophies for Life, Ryan Holiday narrations
+
+Voice Processing Chain (professional order):
+  1. TTS synthesis (edge-tts Neural, slow rate, low pitch)
+  2. High-pass filter @80Hz  — remove sub-bass rumble
+  3. Bass warmth boost @120Hz +6dB — add depth & body
+  4. Mid cut @250Hz -3dB  — remove boxiness
+  5. Presence boost @3kHz +2dB — voice cuts through music
+  6. Dynamic compression — even out dynamics (4:1 ratio)
+  7. Volume boost ×2.5 — loud and authoritative
+  8. Loudnorm I=-14 LUFS — YouTube broadcast standard
+
+Python 3.13 compatible. No GPU. FFmpeg required.
 """
 
 import os
 import asyncio
+import subprocess
+import tempfile
 import numpy as np
 import soundfile as sf
 from pathlib import Path
 from loguru import logger
 
 
-# ── Voice Registry ───────────────────────────────────────────────
-# 15 curated voices across 8 English-speaking regions
-# rate: speech speed (-20% = slower/more gravitas, +5% = slightly faster)
-# pitch: voice pitch (-10Hz = deeper, +5Hz = higher)
+# ── 10 Curated Deep Voices ───────────────────────────────────────
+# Tuned specifically for philosophy narration — slow, deep, commanding
 VOICE_PRESETS = {
-    # ── American English ─────────────────────────────────────────
-    "us_male_deep": {
-        "edge":  "en-US-ChristopherNeural",
-        "rate":  "-8%",
-        "pitch": "-5Hz",
-        "label": "Christopher (Deep American Male)",
-        "flag":  "🇺🇸",
-    },
-    "us_male_calm": {
-        "edge":  "en-US-AndrewNeural",
-        "rate":  "-10%",
-        "pitch": "-3Hz",
-        "label": "Andrew (Calm American Male)",
-        "flag":  "🇺🇸",
-    },
-    "us_female_warm": {
-        "edge":  "en-US-AriaNeural",
-        "rate":  "-8%",
-        "pitch": "+0Hz",
-        "label": "Aria (Warm American Female)",
-        "flag":  "🇺🇸",
-    },
-    "us_female_clear": {
-        "edge":  "en-US-JennyNeural",
-        "rate":  "-6%",
-        "pitch": "+0Hz",
-        "label": "Jenny (Clear American Female)",
-        "flag":  "🇺🇸",
-    },
 
-    # ── British English ──────────────────────────────────────────
-    "gb_male_rich": {
+    # ── 🇬🇧 British (most popular for philosophy YouTube) ─────────
+    "gb_ryan": {
         "edge":  "en-GB-RyanNeural",
-        "rate":  "-12%",
-        "pitch": "-8Hz",
-        "label": "Ryan (Rich British Male)",
+        "rate":  "-18%",       # Slow, deliberate — Stoic pacing
+        "pitch": "-12Hz",      # Deep and commanding
+        "label": "Ryan — Deep British Male",
+        "desc":  "🇬🇧 Deep, commanding. Best for Stoicism.",
         "flag":  "🇬🇧",
     },
-    "gb_male_warm": {
+    "gb_thomas": {
         "edge":  "en-GB-ThomasNeural",
-        "rate":  "-10%",
-        "pitch": "-5Hz",
-        "label": "Thomas (Warm British Male)",
+        "rate":  "-15%",
+        "pitch": "-8Hz",
+        "label": "Thomas — Warm British Male",
+        "desc":  "🇬🇧 Warm, mature. Marcus Aurelius tone.",
         "flag":  "🇬🇧",
     },
-    "gb_female_elegant": {
+    "gb_sonia": {
         "edge":  "en-GB-SoniaNeural",
-        "rate":  "-8%",
-        "pitch": "+0Hz",
-        "label": "Sonia (Elegant British Female)",
+        "rate":  "-14%",
+        "pitch": "-5Hz",
+        "label": "Sonia — Powerful British Female",
+        "desc":  "🇬🇧 Powerful, elegant. Female philosophy voice.",
         "flag":  "🇬🇧",
     },
 
-    # ── Indian English ───────────────────────────────────────────
-    "in_female_expressive": {
-        "edge":  "en-IN-NeerjaExpressiveNeural",
-        "rate":  "-6%",
-        "pitch": "+0Hz",
-        "label": "Neerja (Expressive Indian Female)",
-        "flag":  "🇮🇳",
+    # ── 🇺🇸 American ─────────────────────────────────────────────
+    "us_christopher": {
+        "edge":  "en-US-ChristopherNeural",
+        "rate":  "-16%",
+        "pitch": "-10Hz",
+        "label": "Christopher — Deep American Male",
+        "desc":  "🇺🇸 Deep, authoritative. Documentary narrator.",
+        "flag":  "🇺🇸",
     },
-    "in_female_clear": {
-        "edge":  "en-IN-NeerjaNeural",
-        "rate":  "-8%",
-        "pitch": "+0Hz",
-        "label": "Neerja Classic (Indian Female)",
-        "flag":  "🇮🇳",
+    "us_andrew": {
+        "edge":  "en-US-AndrewNeural",
+        "rate":  "-14%",
+        "pitch": "-6Hz",
+        "label": "Andrew — Calm American Male",
+        "desc":  "🇺🇸 Calm, confident. Ryan Holiday style.",
+        "flag":  "🇺🇸",
     },
-    "in_male_deep": {
+    "us_eric": {
+        "edge":  "en-US-EricNeural",
+        "rate":  "-16%",
+        "pitch": "-8Hz",
+        "label": "Eric — Authoritative American Male",
+        "desc":  "🇺🇸 Strong, clear. Great for motivational.",
+        "flag":  "🇺🇸",
+    },
+
+    # ── 🇮🇳 Indian English ───────────────────────────────────────
+    "in_prabhat": {
         "edge":  "en-IN-PrabhatNeural",
-        "rate":  "-10%",
-        "pitch": "-5Hz",
-        "label": "Prabhat (Deep Indian Male)",
+        "rate":  "-15%",
+        "pitch": "-8Hz",
+        "label": "Prabhat — Deep Indian Male",
+        "desc":  "🇮🇳 Deep, resonant. Philosophical gravitas.",
+        "flag":  "🇮🇳",
+    },
+    "in_neerja": {
+        "edge":  "en-IN-NeerjaExpressiveNeural",
+        "rate":  "-12%",
+        "pitch": "-4Hz",
+        "label": "Neerja — Expressive Indian Female",
+        "desc":  "🇮🇳 Expressive, warm. Unique accent.",
         "flag":  "🇮🇳",
     },
 
-    # ── Australian English ───────────────────────────────────────
-    "au_female": {
-        "edge":  "en-AU-NatashaNeural",
-        "rate":  "-8%",
-        "pitch": "+0Hz",
-        "label": "Natasha (Australian Female)",
-        "flag":  "🇦🇺",
-    },
-    "au_male": {
+    # ── 🇦🇺 Australian ───────────────────────────────────────────
+    "au_william": {
         "edge":  "en-AU-WilliamMultilingualNeural",
-        "rate":  "-8%",
-        "pitch": "-3Hz",
-        "label": "William (Australian Male)",
+        "rate":  "-15%",
+        "pitch": "-8Hz",
+        "label": "William — Deep Australian Male",
+        "desc":  "🇦🇺 Deep, grounded. Nature documentary feel.",
         "flag":  "🇦🇺",
     },
 
-    # ── Canadian English ─────────────────────────────────────────
-    "ca_female": {
-        "edge":  "en-CA-ClaraNeural",
-        "rate":  "-8%",
-        "pitch": "+0Hz",
-        "label": "Clara (Canadian Female)",
-        "flag":  "🇨🇦",
-    },
-    "ca_male": {
-        "edge":  "en-CA-LiamNeural",
-        "rate":  "-10%",
-        "pitch": "-3Hz",
-        "label": "Liam (Canadian Male)",
-        "flag":  "🇨🇦",
-    },
-
-    # ── Irish English ────────────────────────────────────────────
-    "ie_male": {
+    # ── 🇮🇪 Irish ────────────────────────────────────────────────
+    "ie_connor": {
         "edge":  "en-IE-ConnorNeural",
-        "rate":  "-10%",
-        "pitch": "-3Hz",
-        "label": "Connor (Irish Male)",
+        "rate":  "-15%",
+        "pitch": "-8Hz",
+        "label": "Connor — Gravitas Irish Male",
+        "desc":  "🇮🇪 Poetic, profound. Celtic depth.",
         "flag":  "🇮🇪",
     },
 }
 
-# Default voice — deep American male for Stoic content
-DEFAULT_VOICE = "gb_male_rich"
+DEFAULT_VOICE = "gb_ryan"
+SAMPLE_RATE   = 24000
 
-SAMPLE_RATE = 24000
+# ── Legacy key map (backward compat) ────────────────────────────
+_LEGACY_MAP = {
+    "af_bella":               "us_andrew",
+    "bm_george":              "gb_ryan",
+    "am_adam":                "us_christopher",
+    "bf_emma":                "gb_sonia",
+    "af_sarah":               "us_andrew",
+    "am_michael":             "us_eric",
+    "us_male_deep":           "us_christopher",
+    "us_male_calm":           "us_andrew",
+    "us_female_warm":         "us_andrew",
+    "us_female_clear":        "us_andrew",
+    "gb_male_rich":           "gb_ryan",
+    "gb_male_warm":           "gb_thomas",
+    "gb_female_elegant":      "gb_sonia",
+    "in_female_expressive":   "in_neerja",
+    "in_female_clear":        "in_neerja",
+    "in_male_deep":           "in_prabhat",
+    "au_female":              "au_william",
+    "au_male":                "au_william",
+    "ca_female":              "us_andrew",
+    "ca_male":                "us_andrew",
+    "ie_male":                "ie_connor",
+}
 
 
 class TTSEngine:
     """
-    Microsoft Edge Neural TTS Engine.
-    15 curated voices from 8 English-speaking countries.
-    Natural prosody optimized for Stoic spoken-word content.
+    Microsoft Edge Neural TTS + FFmpeg professional audio chain.
+
+    Philosophy YouTube voice sound achieved via:
+      - Slow rate (-14% to -18%) for deliberate Stoic pacing
+      - Low pitch (-6Hz to -12Hz) for gravitas and authority
+      - FFmpeg: HPF + bass warmth + compression + loudnorm
     """
 
     def __init__(self, voice: str = DEFAULT_VOICE):
-        # Accept both the key (gb_male_rich) and legacy keys (af_bella)
-        if voice in VOICE_PRESETS:
-            self.voice_key = voice
-        else:
-            # Legacy key fallback mapping
-            legacy_map = {
-                "af_bella":   "us_female_warm",
-                "bm_george":  "gb_male_rich",
-                "am_adam":    "us_male_deep",
-                "bf_emma":    "gb_female_elegant",
-                "af_sarah":   "us_female_clear",
-                "am_michael": "us_male_calm",
-            }
-            self.voice_key = legacy_map.get(voice, DEFAULT_VOICE)
+        resolved = VOICE_PRESETS.get(voice) or VOICE_PRESETS.get(_LEGACY_MAP.get(voice, ""))
+        if not resolved:
+            logger.warning(f"[TTS] Unknown voice '{voice}' — using default {DEFAULT_VOICE}")
+            resolved = VOICE_PRESETS[DEFAULT_VOICE]
+            voice = DEFAULT_VOICE
 
-        preset = VOICE_PRESETS[self.voice_key]
-        self.edge_voice = preset["edge"]
-        self.rate       = preset["rate"]
-        self.pitch      = preset["pitch"]
+        self.voice_key   = voice if voice in VOICE_PRESETS else _LEGACY_MAP.get(voice, DEFAULT_VOICE)
+        self.edge_voice  = resolved["edge"]
+        self.rate        = resolved["rate"]
+        self.pitch       = resolved["pitch"]
         self.sample_rate = SAMPLE_RATE
 
         logger.info(
-            f"[TTS] {preset['flag']} {preset['label']} "
-            f"| rate={self.rate} pitch={self.pitch} | Engine: edge-tts"
+            f"[TTS] {resolved['flag']} {resolved['label']} "
+            f"| rate={self.rate} pitch={self.pitch}"
         )
 
     def synthesize(self, script_data: dict, output_path: str) -> str:
         """
-        Synthesizes all script beats into a single WAV file.
+        Synthesizes all beats into a single WAV with professional audio processing.
 
         Args:
             script_data: Script dict with 'beats' list
-            output_path: Path to save final WAV
+            output_path: Final WAV path
 
         Returns:
-            str: Path to saved WAV file
+            str: Path to saved WAV
         """
         beats = script_data.get("beats", [])
         if not beats:
@@ -201,107 +205,164 @@ class TTSEngine:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        return loop.run_until_complete(
-            self._synthesize_async(beats, output_path)
-        )
+        # Step 1: Synthesize raw TTS
+        raw_path = output_path.replace(".wav", "_raw.wav")
+        loop.run_until_complete(self._synthesize_raw(beats, raw_path))
 
-    async def _synthesize_async(self, beats: list, output_path: str) -> str:
-        """Synthesize each beat and concatenate with natural pauses."""
+        # Step 2: Apply FFmpeg philosophy voice chain
+        self._apply_voice_chain(raw_path, output_path)
+
+        try:
+            os.unlink(raw_path)
+        except Exception:
+            pass
+
+        return output_path
+
+    async def _synthesize_raw(self, beats: list, output_path: str) -> str:
+        """Synthesize all beats into a single raw WAV (no processing yet)."""
         import edge_tts
-        import tempfile
 
         segments = []
-        # Natural pause durations
-        pause_short  = np.zeros(int(self.sample_rate * 0.30), dtype=np.float32)
-        pause_medium = np.zeros(int(self.sample_rate * 0.55), dtype=np.float32)
-        pause_long   = np.zeros(int(self.sample_rate * 0.85), dtype=np.float32)
+        # Pause durations tuned for philosophy — longer pauses feel more profound
+        pauses = {
+            "hook":    np.zeros(int(self.sample_rate * 1.0), dtype=np.float32),
+            "close":   np.zeros(int(self.sample_rate * 1.0), dtype=np.float32),
+            "insight": np.zeros(int(self.sample_rate * 0.7), dtype=np.float32),
+            "reframe": np.zeros(int(self.sample_rate * 0.7), dtype=np.float32),
+            "pain":    np.zeros(int(self.sample_rate * 0.5), dtype=np.float32),
+            "action":  np.zeros(int(self.sample_rate * 0.4), dtype=np.float32),
+            "default": np.zeros(int(self.sample_rate * 0.5), dtype=np.float32),
+        }
 
         for i, beat in enumerate(beats):
-            # Clean text: remove commas (they cause unnatural pauses in TTS)
-            # and strip philosopher name attributions at end
             text = self._clean_text(beat.get("text", "").strip())
             if not text:
                 continue
 
-            intent = beat.get("intent", "")
+            intent = beat.get("intent", "default")
             logger.debug(f"[TTS] Beat {i+1}/{len(beats)}: '{text}'")
 
             try:
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    tmp_path = tmp.name
+                    tmp_mp3 = tmp.name
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_wav = tmp.name
 
-                communicate = edge_tts.Communicate(
+                # Synthesize MP3 via edge-tts
+                comm = edge_tts.Communicate(
                     text=text,
                     voice=self.edge_voice,
                     rate=self.rate,
                     pitch=self.pitch,
                     volume="+0%",
                 )
-                await communicate.save(tmp_path)
+                await comm.save(tmp_mp3)
 
-                # Load MP3 as numpy float32
-                audio, sr = sf.read(tmp_path, dtype="float32")
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
+                # Convert MP3 → WAV via FFmpeg (more reliable than soundfile MP3)
+                subprocess.run([
+                    "ffmpeg", "-i", tmp_mp3,
+                    "-ar", str(self.sample_rate),
+                    "-ac", "1",
+                    tmp_wav, "-y",
+                ], capture_output=True, check=True)
 
+                audio, _ = sf.read(tmp_wav, dtype="float32")
                 if audio.ndim > 1:
                     audio = audio.mean(axis=1)
 
                 segments.append(audio)
+                segments.append(pauses.get(intent, pauses["default"]))
 
-                # Pause selection by intent
-                if intent in ("hook", "close"):
-                    segments.append(pause_long)
-                elif intent in ("insight", "reframe"):
-                    segments.append(pause_medium)
-                else:
-                    segments.append(pause_short)
-
-                logger.info(f"[TTS] Beat {i+1} done: {len(audio)/self.sample_rate:.2f}s")
+                logger.info(f"[TTS] Beat {i+1}: {len(audio)/self.sample_rate:.2f}s")
 
             except Exception as e:
-                logger.warning(f"[TTS] Beat {i+1} failed: {e} — skipping")
+                logger.warning(f"[TTS] Beat {i+1} failed: {e}")
+            finally:
+                for p in [tmp_mp3, tmp_wav]:
+                    try: os.unlink(p)
+                    except: pass
 
         if not segments:
-            raise RuntimeError("[TTS] No audio segments produced")
+            raise RuntimeError("[TTS] No audio produced")
 
-        full_audio = np.concatenate(segments).astype(np.float32)
-
-        # Normalize — prevents clipping without changing character
-        max_val = np.abs(full_audio).max()
-        if max_val > 0:
-            full_audio = full_audio / max_val * 0.92
-
-        sf.write(output_path, full_audio, self.sample_rate, format="WAV")
-        duration = len(full_audio) / self.sample_rate
-        logger.info(f"[TTS] {len(beats)} beats → {duration:.2f}s → {output_path}")
+        full = np.concatenate(segments).astype(np.float32)
+        sf.write(output_path, full, self.sample_rate, format="WAV")
+        logger.info(f"[TTS] Raw audio: {len(full)/self.sample_rate:.2f}s → {output_path}")
         return output_path
+
+    def _apply_voice_chain(self, input_path: str, output_path: str):
+        """
+        FFmpeg professional philosophy voice chain:
+
+          HPF(80Hz)                — remove sub-bass rumble
+          equalizer(120Hz, +6dB)  — add bass body and warmth
+          equalizer(250Hz, -3dB)  — cut boxy mid frequencies
+          equalizer(3000Hz, +2dB) — presence boost, cuts through music
+          acompressor(4:1)        — dynamic compression
+          volume(2.5)             — loud and authoritative
+          loudnorm(-14 LUFS)      — YouTube broadcast standard
+
+        This chain replicates what Daily Stoic / Einzelgänger use.
+        """
+        af_chain = (
+            # 1. Remove sub-bass rumble
+            "highpass=f=80,"
+            # 2. Bass body — warmth and depth at 120Hz
+            "equalizer=f=120:t=q:w=1.5:g=6,"
+            # 3. Cut boxiness at 250Hz
+            "equalizer=f=250:t=q:w=1:g=-3,"
+            # 4. Presence boost — voice cuts through background music
+            "equalizer=f=3000:t=q:w=2:g=2,"
+            # 5. Dynamic compression — even out dynamics
+            "acompressor=threshold=-18dB:ratio=4:attack=5:release=80:makeup=4dB,"
+            # 6. Volume — loud and commanding
+            "volume=2.5,"
+            # 7. Loudness normalization to YouTube standard (-14 LUFS)
+            "loudnorm=I=-14:TP=-1.5:LRA=7"
+        )
+
+        cmd = [
+            "ffmpeg", "-i", input_path,
+            "-af", af_chain,
+            "-ar", "44100",   # Upsample to 44.1kHz for final quality
+            "-ac", "1",
+            output_path, "-y",
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning(f"[TTS] Voice chain failed: {result.stderr[-300:]}")
+            # Fallback: just copy with volume boost
+            subprocess.run([
+                "ffmpeg", "-i", input_path,
+                "-af", "volume=2.5,loudnorm=I=-14:TP=-1.5",
+                "-ar", "44100", "-ac", "1",
+                output_path, "-y",
+            ], capture_output=True, check=False)
+
+        logger.info(f"[TTS] Voice chain applied → {output_path}")
 
     def _clean_text(self, text: str) -> str:
         """
-        Cleans TTS text for natural speech:
-        - Strips trailing philosopher names (Epictetus, Seneca, etc.)
-        - Removes commas (cause TTS to pause awkwardly)
-        - Ensures sentence ends with period
+        Cleans text for natural TTS:
+        - Strip philosopher names at end of sentence (", Epictetus" or " Epictetus")
+        - Remove commas (cause robotic pauses in TTS)
+        - Ensure period at end
         """
-        # List of known philosopher/attribution words that should be stripped
-        philosopher_names = [
+        STRIP_NAMES = [
             "Epictetus", "Seneca", "Marcus Aurelius", "Aurelius",
             "Stoics", "Stoic", "Zeno", "Chrysippus", "Cleanthes",
         ]
-        for name in philosopher_names:
-            # Remove ", Name" or " Name" at end of sentence
-            if text.endswith(f", {name}"):
-                text = text[: -(len(name) + 2)]
-            elif text.endswith(f" {name}"):
-                text = text[: -(len(name) + 1)]
+        # Strip names at the very end (with or without comma before)
+        for name in STRIP_NAMES:
+            for suffix in [f", {name}", f" {name}"]:
+                if text.endswith(suffix):
+                    text = text[: -len(suffix)]
 
-        # Remove commas — they cause TTS to pause at wrong places
+        # Remove all commas — they cause robotic pauses in TTS
         text = text.replace(",", "")
 
-        # Ensure ends with period for clean TTS termination
         text = text.strip()
         if text and text[-1] not in ".!?":
             text += "."
@@ -310,11 +371,12 @@ class TTSEngine:
 
 
 def get_voice_list() -> list:
-    """Returns all available voices for the frontend API."""
+    """Returns all 10 voices for the frontend."""
     return [
         {
             "id":    key,
             "label": preset["label"],
+            "desc":  preset["desc"],
             "flag":  preset["flag"],
             "edge":  preset["edge"],
         }

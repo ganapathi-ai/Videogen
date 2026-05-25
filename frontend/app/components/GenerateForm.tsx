@@ -20,51 +20,37 @@ const STOIC_TOPICS = [
   "Finding Stillness",
 ];
 
-// 15 voices grouped by region — matches backend VOICE_PRESETS
+// 10 Deep Philosophy Voices — grouped by region
+// All tuned for Stoic narration: slow rate, low pitch, bass-boosted
 const VOICE_GROUPS = [
+  {
+    region: "🇬🇧 British — Most Popular for Philosophy",
+    voices: [
+      { id: "gb_ryan",   label: "Ryan",   desc: "Deep • Commanding • Best for Stoicism" },
+      { id: "gb_thomas", label: "Thomas", desc: "Warm • Mature • Marcus Aurelius tone"  },
+      { id: "gb_sonia",  label: "Sonia",  desc: "Powerful • Elegant • Female"           },
+    ],
+  },
   {
     region: "🇺🇸 American",
     voices: [
-      { id: "us_male_deep",   label: "Christopher", desc: "Deep • Male"   },
-      { id: "us_male_calm",   label: "Andrew",      desc: "Calm • Male"   },
-      { id: "us_female_warm", label: "Aria",        desc: "Warm • Female" },
-      { id: "us_female_clear",label: "Jenny",       desc: "Clear • Female"},
+      { id: "us_christopher", label: "Christopher", desc: "Deep • Authoritative • Documentary" },
+      { id: "us_andrew",      label: "Andrew",      desc: "Calm • Confident • Ryan Holiday"    },
+      { id: "us_eric",        label: "Eric",         desc: "Strong • Motivational • Clear"      },
     ],
   },
   {
-    region: "🇬🇧 British",
+    region: "🇮🇳 Indian English",
     voices: [
-      { id: "gb_male_rich",     label: "Ryan",   desc: "Rich • Male"     },
-      { id: "gb_male_warm",     label: "Thomas", desc: "Warm • Male"     },
-      { id: "gb_female_elegant",label: "Sonia",  desc: "Elegant • Female"},
+      { id: "in_prabhat", label: "Prabhat", desc: "Deep • Resonant • Philosophical"   },
+      { id: "in_neerja",  label: "Neerja",  desc: "Expressive • Warm • Unique accent" },
     ],
   },
   {
-    region: "🇮🇳 Indian",
+    region: "🇦🇺 Australian  •  🇮🇪 Irish",
     voices: [
-      { id: "in_female_expressive", label: "Neerja Pro", desc: "Expressive • Female" },
-      { id: "in_female_clear",      label: "Neerja",     desc: "Clear • Female"      },
-      { id: "in_male_deep",         label: "Prabhat",    desc: "Deep • Male"         },
-    ],
-  },
-  {
-    region: "🇦🇺 Australian",
-    voices: [
-      { id: "au_female", label: "Natasha", desc: "Female" },
-      { id: "au_male",   label: "William", desc: "Male"   },
-    ],
-  },
-  {
-    region: "🇨🇦 Canadian",
-    voices: [
-      { id: "ca_female", label: "Clara", desc: "Female" },
-      { id: "ca_male",   label: "Liam",  desc: "Male"   },
-    ],
-  },
-  {
-    region: "🇮🇪 Irish",
-    voices: [
-      { id: "ie_male", label: "Connor", desc: "Male" },
+      { id: "au_william", label: "William", desc: "🇦🇺 Deep • Grounded • Documentary feel" },
+      { id: "ie_connor",  label: "Connor",  desc: "🇮🇪 Poetic • Profound • Celtic depth"  },
     ],
   },
 ];
@@ -95,7 +81,7 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
   const [topic,       setTopic]       = useState("");
   const [length,      setLength]      = useState<"short" | "medium">("short");
   const [aspectRatio, setAspectRatio] = useState("9:16");
-  const [voice,       setVoice]       = useState("gb_male_rich");  // Ryan — deep British
+  const [voice,       setVoice]       = useState("gb_ryan");  // Ryan — deep British (best for Stoicism)
   const [voiceOpen,   setVoiceOpen]   = useState(false);
 
   // Find currently selected voice label
@@ -203,7 +189,7 @@ export default function GenerateForm({ onSubmit, isGenerating }: GenerateFormPro
 
       {/* ── Voice Selector ── */}
       <div>
-        <label style={labelStyle}>Narrator Voice · Microsoft Neural TTS</label>
+        <label style={labelStyle}>Narrator Voice · Deep Neural TTS + Bass Chain</label>
 
         {/* Current selection display */}
         <button
