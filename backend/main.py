@@ -1,7 +1,11 @@
 """
-THE INNER CITADEL — FastAPI Backend (CPU-Only, No Celery/Redis)
-Uses FastAPI BackgroundTasks — zero external dependencies for the queue.
+VOXLORE STUDIO — FastAPI Backend (CPU-Only, No Celery/Redis)
+Multi-channel AI video generation: Stoic philosophy + Tech concept explainer.
 Progress tracked in-memory. SSE streams live updates to the frontend.
+
+Channels:
+  The Inner Citadel  (stoic)   — philosophy, dark ambient BGM, gold theme
+  neuralbaba_empire  (tech)    — concept explainer, electronic BGM, cyan theme
 
 Works perfectly on Intel CPU with 30GB RAM.
 """
@@ -32,9 +36,9 @@ EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────────────────────
 app = FastAPI(
-    title="Inner Citadel API",
-    description="Autonomous Stoic Video Pipeline — CPU Mode",
-    version="2.0.0",
+    title="Voxlore Studio API",
+    description="VOXLORE STUDIO — Multi-channel AI Video Generator (Stoic + Tech)",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -193,16 +197,18 @@ async def list_voices():
 
 @app.get("/api/history")
 async def get_history():
-    """Returns per-channel history stats + past topics. No channel mixing."""
-    from history.history_engine import HistoryEngine, HISTORY_FILES
-    result = {}
+    """Returns per-channel history stats. Auto-discovers all channels via subfolder scan."""
+    from history.history_engine import get_all_history_stats, HISTORY_FILES
+    # Also ensure known channels appear even if empty
+    stats = get_all_history_stats()
     for ch_id in HISTORY_FILES:
-        h = HistoryEngine(channel_id=ch_id)
-        result[ch_id] = {
-            "stats":       h.get_stats(),
-            "past_topics": h.get_all_topics(),
-        }
-    return {"channels": result, "note": "Each channel's history is completely isolated"}
+        if ch_id not in stats:
+            from history.history_engine import HistoryEngine
+            stats[ch_id] = HistoryEngine(channel_id=ch_id).get_stats()
+    return {
+        "channels": {ch: {"stats": s, "past_topics": []} for ch, s in stats.items()},
+        "note": "Each channel's history is completely isolated in its own subfolder"
+    }
 
 
 
@@ -353,14 +359,18 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         )
 
         # ── Step 8: BGM + Audio Mix ──────────────────────────────
-        set_progress(job_id, 8, "🎵 Fetching Stoic BGM + professional mix...", total_steps)
+        set_progress(job_id, 8, f"🎵 Fetching {channel_cfg['name']} BGM + professional mix...", total_steps)
         from audio.bgm_engine import BGMEngine
         from audio.audio_mixer import AudioMixer
 
         # Get dominant emotions from timeline for BGM selection
         emotions = [seg.get("emotion", "deep") for seg in timeline.get("segments", [])]
 
-        bgm_engine = BGMEngine(api_key=os.getenv("FREESOUND_API_KEY", ""))
+        # Channel-specific BGM: stoic gets dark ambient, tech gets electronic
+        bgm_engine = BGMEngine(
+            api_key=os.getenv("FREESOUND_API_KEY", ""),
+            channel_id=channel,
+        )
         bgm_path   = bgm_engine.get_track(emotions, timeline.get("duration", 30.0))
 
         mixed_audio = str(job_dir / "audio_mixed.wav")

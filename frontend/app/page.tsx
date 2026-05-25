@@ -50,20 +50,25 @@ const DEFAULT_CHANNELS: ChannelInfo[] = [
     id: "tech",
     name: "neuralbaba_empire",
     handle: "@neuralbaba_empire",
-    tagline: "The Future is Already Here.",
-    description: "AI, technology and data science — explained for everyone.",
+    tagline: "How Technology Actually Works.",
+    description: "Tech concept explainers — AI, systems, and code made simple.",
     emoji: "💻",
     accent_color: "#00D4FF",
     default_voice: "us_christopher",
     default_aspect: "9:16",
     default_length: "short",
-    seo_tags: ["AI", "machine learning", "tech", "programming"],
+    seo_tags: ["how AI works", "machine learning explained", "how ChatGPT works", "programming explained"],
     topics: [
-      "AI is Changing Everything Right Now", "How ChatGPT Actually Works Inside",
-      "Why Python Won the Data Science War", "The Rise of AI Agents",
-      "Why 90 Percent of AI Projects Fail", "How Netflix Recommends Your Next Show",
-      "The Truth About AI Consciousness", "The Future of Work in the Age of AI",
-      "The Mindset of a 10x Engineer", "The Dark Side of Social Media Algorithms",
+      "How Large Language Models Actually Work",
+      "How Neural Networks Learn From Data",
+      "How ChatGPT Generates Text Word by Word",
+      "How Netflix Serves 600 Million Users Without Crashing",
+      "How Binary Search Finds Anything in Milliseconds",
+      "How Encryption Keeps Your Data Private",
+      "How Docker Containers Work Under the Hood",
+      "How APIs Connect the Digital World",
+      "How Recommendation Algorithms Predict Your Next Watch",
+      "How Quantum Computers Use Superposition to Compute",
     ],
   },
 ];
@@ -228,7 +233,10 @@ export default function HomePage() {
               background: accentGlow,
               transition: "all 0.4s ease",
             }}>
-              <span>⚡</span> NeuralBaba Empire · Autonomous Video Pipeline
+              <span style={{ fontFamily: "'Orbitron', sans-serif", fontWeight: 700, letterSpacing: "0.15em", fontSize: "0.72rem" }}>⬡</span>
+              <span style={{ fontFamily: "'Orbitron', sans-serif" }}>VOXLORE</span>
+              <span style={{ color: accent, fontFamily: "'Orbitron', sans-serif", transition: "color 0.4s ease" }}>STUDIO</span>
+              <span style={{ opacity: 0.4, fontSize: "0.65rem" }}>· AI Video Pipeline</span>
             </div>
 
             {/* ── Channel Selector Tabs ── */}
