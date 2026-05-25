@@ -1,65 +1,88 @@
 # ================================================================
-#  THE INNER CITADEL — Python Dependencies
+#  VOXLORE STUDIO — Python Dependencies
 #  Python 3.13.0 | Windows | CPU-Only | Intel | No GPU
-#  All versions verified compatible with Python 3.13 on Windows
-#  Research date: May 2026
+#
+#  VERIFIED ACTUAL INSTALLED VERSIONS (tested May 2026):
+#  All packages below import successfully on Python 3.13.0 Windows.
+#  Versions pinned to what is confirmed working on this system.
+#  To install: pip install -r requirements.txt
 # ================================================================
 
-# ── Web Framework ────────────────────────────────────────────────
+# ── Web Framework ─────────────────────────────────────────────────
 fastapi==0.136.3
-uvicorn[standard]==0.48.0
-python-multipart==0.0.29
-python-dotenv==1.1.0
+uvicorn[standard]==0.40.0
+python-multipart==0.0.21
+python-dotenv==1.2.1
 
-# ── LLM APIs ─────────────────────────────────────────────────────
-# IMPORTANT: google-generativeai reached EOL Nov 30, 2025
-# Replaced by google-genai (different import: from google import genai)
+# ── LLM APIs ──────────────────────────────────────────────────────
+# NOTE: google-generativeai is EOL (Nov 2025). Use google-genai instead.
+# Import: from google import genai
 google-genai==2.6.0
 httpx==0.28.1
 groq==1.2.0
 
-# ── Text-to-Speech — Microsoft Neural TTS ────────────────────────
-# edge-tts replaces kokoro (kokoro incompatible with Python 3.13)
-# Free, no API key, no system deps, no GPU needed
-# Requires internet (same as Groq/Pexels API calls)
-edge-tts==7.2.8
+# ── Text-to-Speech — Microsoft Edge Neural TTS ────────────────────
+# Replaces kokoro (kokoro 0.9.x requires Python <3.13; 0.7.x needs espeak-ng)
+# edge-tts: free, no API key, no system deps, no GPU
+# Requires internet for synthesis (streams from Microsoft servers)
+# 400+ voices including deep male: en-GB-RyanNeural, en-US-ChristopherNeural
+edge-tts==7.2.7
 
-# ── Audio Processing ─────────────────────────────────────────────
+# ── Audio Processing ──────────────────────────────────────────────
 soundfile==0.13.1
 
-# ── Video Composition — MoviePy 2.x ──────────────────────────────
-# moviepy 2.x: use `from moviepy import X` (not moviepy.editor)
-# FFmpeg auto-downloaded on first use via imageio-ffmpeg
-moviepy==2.2.1
-imageio>=2.36.0
-imageio-ffmpeg>=0.5.1
+# ── Video Composition — MoviePy 2.x ───────────────────────────────
+# moviepy 2.x: import as `from moviepy import X` (not moviepy.editor)
+# Python 3.13 compatible. FFmpeg used separately via subprocess.
+moviepy==2.1.2
+imageio==2.37.3
+imageio-ffmpeg==0.6.0
 
-# ── Image / Numerical ────────────────────────────────────────────
-Pillow==12.2.0
-numpy>=2.1.0
+# ── Image / Numerical ─────────────────────────────────────────────
+Pillow==11.3.0
+numpy==2.4.2
 
-# ── Subtitle Generation ──────────────────────────────────────────
+# ── Subtitle Generation ───────────────────────────────────────────
 pysubs2==1.8.1
 
-# ── HTTP / Retry ─────────────────────────────────────────────────
-requests==2.34.2
-tenacity==9.1.4
+# ── HTTP / Retry ──────────────────────────────────────────────────
+requests==2.32.3
+tenacity==8.5.0
 
-# ── Semantic Similarity ──────────────────────────────────────────
-# NOTE: PyTorch CPU is installed separately in start_dev.bat FIRST
-# to prevent GPU version being pulled in accidentally
-faiss-cpu==1.14.2
-sentence-transformers==5.5.1
+# ── Semantic Similarity ───────────────────────────────────────────
+# NOTE: faiss-cpu has NO Python 3.13 Windows wheels on PyPI.
+# Do NOT install faiss-cpu on Python 3.13 Windows — it will fail to import.
+# Our FAISSEngine uses sentence-transformers + pure numpy cosine similarity.
+# No faiss binary is needed — the engine works fully without it.
+sentence-transformers==5.2.0
+# PyTorch CPU: install separately BEFORE this file to avoid GPU version
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-# ── Data Validation ──────────────────────────────────────────────
+# ── Data Validation ───────────────────────────────────────────────
 pydantic==2.13.4
 
-# ── Logging ──────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────
 loguru==0.7.3
 
-# ── Ngrok Tunnel (exposes localhost:8000 to Vercel) ───────────────
+# ── Ngrok Tunnel ──────────────────────────────────────────────────
 pyngrok==8.1.2
 
-# ── Async / File IO ──────────────────────────────────────────────
-aiofiles
-anyio
+# ── Async / File IO ───────────────────────────────────────────────
+aiofiles==24.1.0
+anyio==4.13.0
+
+# ================================================================
+# PACKAGES NOT INCLUDED (incompatible with Python 3.13 Windows):
+#
+#   kokoro          — requires Python <3.13 (0.9.x) OR espeak-ng
+#                     system binary (0.7.x). Use edge-tts instead.
+#
+#   faiss-cpu       — NO Python 3.13 Windows wheels on PyPI.
+#                     Our FAISSEngine uses numpy cosine similarity fallback.
+#                     Do not install on Python 3.13 Windows.
+#
+#   whisperx        — heavy CUDA dependency, not CPU-friendly on Windows.
+#                     Our alignment engine has a proportional fallback.
+#
+#   moviepy.editor  — old 1.x import style. Use moviepy 2.x import style.
+# ================================================================
