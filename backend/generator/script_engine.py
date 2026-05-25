@@ -6,6 +6,14 @@ All three APIs have completely FREE tiers — no credit card conflicts:
   • Groq:        14,400 req/day free  | 500+ tok/sec | console.groq.com/keys
   • OpenRouter:  Unlimited free models| `:free` suffix| openrouter.ai/keys
   • Gemini:      1M tokens/day free   | aistudio.google.com/apikey
+
+VIDEO LENGTHS supported:
+  Shorts/Reels:  short (~35s, 7 beats) | medium (~60s, 12 beats)
+  Full YouTube:  long_3 (3 min, 36 beats) | long_5 (5 min, 60 beats)
+                 long_7 (7 min, 84 beats) | long_11 (11 min, 130 beats)
+
+Long-form structure (Einzelgänger / Philosophies for Life style):
+  HOOK → PROBLEM → PHILOSOPHY → STORY → APPLICATION → CLOSE
 """
 
 import os
@@ -20,21 +28,55 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
 # ─────────────────────────────────────────────────────────────────
-# Pydantic Schema — Forces exact JSON structure from LLM
+# Length Configuration
+# Research basis: Einzelgänger, Philosophies for Life, Daily Stoic
+# Beat avg: 9 words @ -15% TTS rate ≈ 5s/beat + 0.6s pause = 5.6s/beat
+# ─────────────────────────────────────────────────────────────────
+
+LENGTH_CONFIG = {
+    # ── Shorts / Reels ─────────────────────────────────
+    "short":   {"target_s": 35,  "beats": 7,   "type": "short",  "label": "~35s Short"},
+    "medium":  {"target_s": 60,  "beats": 12,  "type": "short",  "label": "~60s Short"},
+    # ── Full YouTube ────────────────────────────────────
+    "long_3":  {"target_s": 180, "beats": 34,  "type": "long",   "label": ">3 min YouTube"},
+    "long_5":  {"target_s": 300, "beats": 56,  "type": "long",   "label": ">5 min YouTube"},
+    "long_7":  {"target_s": 420, "beats": 78,  "type": "long",   "label": ">7 min YouTube"},
+    "long_11": {"target_s": 660, "beats": 122, "type": "long",   "label": ">11 min YouTube"},
+}
+
+# Groq llama has a context window of 8k tokens
+# For long videos we chunk the generation into multiple calls
+# Each chunk: max 30 beats
+MAX_BEATS_PER_CALL = 28
+
+# Long-form chapter structure (Einzelgänger / Philosophies for Life research)
+# Each chapter gets a proportion of the total beats
+LONG_FORM_CHAPTERS = [
+    {"name": "HOOK",        "intent": "hook",    "proportion": 0.08},  # ~8%
+    {"name": "PROBLEM",     "intent": "pain",    "proportion": 0.18},  # ~18%
+    {"name": "PHILOSOPHY",  "intent": "insight", "proportion": 0.28},  # ~28%
+    {"name": "STORY",       "intent": "reframe", "proportion": 0.22},  # ~22%
+    {"name": "APPLICATION", "intent": "action",  "proportion": 0.16},  # ~16%
+    {"name": "CLOSE",       "intent": "close",   "proportion": 0.08},  # ~8%
+]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Pydantic Schema
 # ─────────────────────────────────────────────────────────────────
 
 class Beat(BaseModel):
     id: int
-    text: str = Field(description="Exactly 5-10 words. One powerful Stoic idea. No filler.")
-    emotion: str = Field(description="One of: minimal | deep | emotional | modern | resolute | inspiring | steady | reassuring")
-    intent: str = Field(description="Narrative stage: hook | pain | insight | reframe | action | close")
-    visual_keywords: List[str] = Field(description="2-3 cinematic search queries for Pexels/Pixabay. E.g. ['roman soldier', 'sunset mountain']")
+    text: str = Field(description="Exactly 6-12 words. One powerful Stoic idea. No filler.")
+    emotion: str = Field(description="One of: minimal|deep|emotional|modern|resolute|inspiring|steady|reassuring")
+    intent: str = Field(description="Narrative stage: hook|pain|insight|reframe|action|close")
+    visual_keywords: List[str] = Field(description="2-3 cinematic Pexels search terms. E.g. ['roman soldier', 'sunset mountain']")
 
 class Script(BaseModel):
     title: str = Field(description="Cinematic philosophical title")
     topic: str
-    duration_target: int = Field(description="Target duration in seconds")
-    hook: str = Field(description="Opening hook — max 10 words, creates immediate tension")
+    duration_target: int
+    hook: str = Field(description="Opening hook — max 10 words. Creates immediate tension.")
     beats: List[Beat]
 
 
@@ -45,42 +87,51 @@ class Script(BaseModel):
 SYSTEM_PROMPT = """You are an elite cinematic narrator writing spoken-word scripts for THE INNER CITADEL — a Stoic philosophy YouTube channel.
 
 CRITICAL RULES — follow every single one:
-1. NEVER mention any philosopher name (no Epictetus, no Seneca, no Marcus Aurelius, no Stoics). The narrator IS the voice — no attributions.
+1. NEVER mention any philosopher name (no Epictetus, no Seneca, no Marcus Aurelius, no Stoics, no Zeno, no Cleanthes). The narrator IS the voice — no attributions ever.
 2. NEVER use commas. Commas make TTS pause unnaturally. Use short separate sentences instead.
 3. Each beat must be 6-12 words. One powerful self-contained statement.
 4. Write as if you are SPEAKING directly to the viewer. Use "you" and "your". Personal. Urgent.
 5. Language must feel like spoken poetry — short punchy words. NOT academic prose.
-6. The arc must flow: Hook → Pain → Insight → Reframe → Action → Close
-7. No commas. No colons. No semicolons. No parentheses. No dashes. Only periods.
-8. YOU MUST respond ONLY with valid JSON. No explanation. No markdown. No preamble.
-9. The JSON must exactly match the schema provided."""
+6. No commas. No colons. No semicolons. No parentheses. No dashes. Only periods and exclamation marks.
+7. YOU MUST respond ONLY with valid JSON. No explanation. No markdown. No preamble.
+8. The JSON must exactly match the schema provided.
+9. Each beat must be COMPLETELY UNIQUE — never repeat the same idea twice.
+10. Build emotional arc: start tense → go deeper → resolve powerfully."""
 
-def _user_prompt(topic: str, duration_target: int, num_beats: int) -> str:
+
+def _short_form_prompt(topic: str, duration_target: int, num_beats: int,
+                        used_beats: list = None) -> str:
+    used_section = ""
+    if used_beats:
+        sample = used_beats[:5]
+        used_section = f"\n\nAVOID THESE EXACT PHRASINGS (already used in past videos):\n"
+        used_section += "\n".join(f'  - "{b}"' for b in sample)
+
     return f"""Generate a {duration_target}-second spoken-word Stoic video script about: "{topic}"
 
-Target exactly {num_beats} beats.
-Each beat = 6-12 words MAXIMUM. One idea per beat.
-Write as direct speech to the viewer. No names. No commas. Only periods.
+Target exactly {num_beats} beats. This is a SHORT-FORM video (Shorts/Reels).
+Arc: Hook (1 beat) → Pain (2 beats) → Insight (2 beats) → Action (1 beat) → Close (1 beat)
 
-GOOD example beats:
+Each beat = 6-12 words MAXIMUM. One idea. No names. No commas. Only periods.
+
+GOOD beats:
   "Your mind is not your identity."
   "Every thought you resist will consume you."
   "The pain you feel is not permanent."
   "You have always had the power to choose."
   "Begin now. Act. Do not hesitate."
 
-BAD examples (avoid):
-  "You are not your thoughts, Epictetus" — DO NOT add names
-  "Ego fuels your inner turmoil, Seneca" — DO NOT add names
-  "Recognize the ego's power, Stoics" — DO NOT add names
-  "Let go, breathe, and find peace" — DO NOT use commas
-
+BAD (avoid):
+  "You are not your thoughts, Epictetus" — NO names
+  "Ego fuels your inner turmoil, Seneca" — NO names
+  "Let go, breathe, and find peace" — NO commas
+{used_section}
 Return ONLY this JSON:
 {{
   "title": "string",
   "topic": "{topic}",
   "duration_target": {duration_target},
-  "hook": "string (max 10 words. no commas. grabs attention instantly)",
+  "hook": "string (max 10 words. grabs attention instantly. no commas.)",
   "beats": [
     {{
       "id": 1,
@@ -88,6 +139,56 @@ Return ONLY this JSON:
       "emotion": "one of: minimal|deep|emotional|modern|resolute|inspiring|steady|reassuring",
       "intent": "one of: hook|pain|insight|reframe|action|close",
       "visual_keywords": ["search term 1", "search term 2"]
+    }}
+  ]
+}}"""
+
+
+def _long_form_prompt(topic: str, duration_target: int, num_beats: int,
+                       chapter_name: str, chapter_intent: str,
+                       chapter_beats: int, start_id: int,
+                       used_beats: list = None) -> str:
+    duration_min = duration_target // 60
+
+    used_section = ""
+    if used_beats:
+        sample = used_beats[:8]
+        used_section = f"\n\nAVOID THESE PHRASINGS (used in past videos or earlier chapters):\n"
+        used_section += "\n".join(f'  - "{b}"' for b in sample)
+
+    return f"""Generate beats for chapter "{chapter_name}" of a >{duration_min}-minute Stoic YouTube video about: "{topic}"
+
+This chapter covers: {chapter_intent.upper()} — generate exactly {chapter_beats} beats for this chapter.
+Start beat IDs from {start_id}.
+
+Chapter purpose:
+  HOOK:        Shock the viewer. Make them feel they MUST watch.
+  PROBLEM:     Describe the pain/struggle the viewer lives with. Be specific.
+  PHILOSOPHY:  The core Stoic insight. Slow down. Go deep. Build understanding.
+  STORY:       An illustrative scenario (no real names). Make it vivid.
+  APPLICATION: Practical. "Here is what you do." Concrete daily actions.
+  CLOSE:       Unforgettable ending. Leave them changed.
+
+LONG-FORM style (deeper than Shorts):
+  - More nuanced. Allow 2-3 beats to develop one idea.
+  - Use varied rhythms: short punchy beats AND longer (10-12 word) poetic beats.
+  - Build momentum. Each beat should flow naturally from the previous.
+  - NO commas. NO philosopher names (no Epictetus, Seneca, Aurelius, Zeno). Only periods. Direct address.
+  - Every beat must say "no names" — speak universally, not as attribution.
+{used_section}
+Return ONLY this JSON:
+{{
+  "title": "string",
+  "topic": "{topic}",
+  "duration_target": {duration_target},
+  "hook": "string (max 10 words)",
+  "beats": [
+    {{
+      "id": {start_id},
+      "text": "6-12 word statement. No commas. No names.",
+      "emotion": "one of: minimal|deep|emotional|modern|resolute|inspiring|steady|reassuring",
+      "intent": "{chapter_intent}",
+      "visual_keywords": ["cinematic search term 1", "cinematic search term 2"]
     }}
   ]
 }}"""
@@ -101,34 +202,26 @@ class GroqClient:
     """Groq API — Fastest inference. 14,400 free requests/day."""
 
     def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY", "")
-        self.model   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.api_key  = os.getenv("GROQ_API_KEY", "")
+        self.model    = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         self.base_url = "https://api.groq.com/openai/v1"
 
     def available(self) -> bool:
         return bool(self.api_key and self.api_key != "YOUR_GROQ_KEY_HERE")
 
-    def generate(self, system: str, user: str) -> str:
+    def generate(self, system: str, user: str, max_tokens: int = 4096) -> str:
         import httpx
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            "temperature": 0.75,
-            "max_tokens": 2048,
-            "response_format": {"type": "json_object"},   # Forces JSON output
-        }
         resp = httpx.post(
             f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json={
+                "model":   self.model,
+                "messages":[{"role":"system","content":system},{"role":"user","content":user}],
+                "temperature":     0.78,
+                "max_tokens":      max_tokens,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=60,
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
@@ -138,46 +231,38 @@ class OpenRouterClient:
     """OpenRouter API — Many free models. Unlimited with :free suffix."""
 
     def __init__(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.model   = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
+        self.api_key  = os.getenv("OPENROUTER_API_KEY", "")
+        self.model    = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash:free")
         self.base_url = "https://openrouter.ai/api/v1"
 
     def available(self) -> bool:
         return bool(self.api_key and self.api_key != "YOUR_OPENROUTER_KEY_HERE")
 
-    def generate(self, system: str, user: str) -> str:
+    def generate(self, system: str, user: str, max_tokens: int = 4096) -> str:
         import httpx
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://inner-citadel.app",
-            "X-Title": "Inner Citadel",
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            "temperature": 0.75,
-            "max_tokens": 2048,
-            "response_format": {"type": "json_object"},
-        }
         resp = httpx.post(
             f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type":  "application/json",
+                "HTTP-Referer":  "https://inner-citadel.app",
+                "X-Title":       "Inner Citadel",
+            },
+            json={
+                "model":   self.model,
+                "messages":[{"role":"system","content":system},{"role":"user","content":user}],
+                "temperature":     0.78,
+                "max_tokens":      max_tokens,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=60,
         )
         resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        return resp.json()["choices"][0]["message"]["content"]
 
 
 class GeminiClient:
-    """Google Gemini API — 1M tokens/day free. Last resort fallback.
-    Uses google-genai SDK (replaces deprecated google-generativeai).
-    """
+    """Google Gemini API — 1M tokens/day free. Fallback."""
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "")
@@ -186,18 +271,16 @@ class GeminiClient:
     def available(self) -> bool:
         return bool(self.api_key and self.api_key != "YOUR_GEMINI_KEY_HERE")
 
-    def generate(self, system: str, user: str) -> str:
-        # google-genai SDK (google-generativeai reached EOL Nov 2025)
+    def generate(self, system: str, user: str, max_tokens: int = 4096) -> str:
         from google import genai
         from google.genai import types
-
         client = genai.Client(api_key=self.api_key)
         response = client.models.generate_content(
             model=self.model,
             contents=user,
             config=types.GenerateContentConfig(
                 system_instruction=system,
-                temperature=0.75,
+                temperature=0.78,
                 response_mime_type="application/json",
             ),
         )
@@ -205,15 +288,14 @@ class GeminiClient:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Script Engine — Priority Chain
+# Script Engine — Priority Chain + Long-Form Support
 # ─────────────────────────────────────────────────────────────────
 
 class ScriptEngine:
     """
-    Generates Stoic video scripts using LLM priority chain:
-    Groq (fastest) → OpenRouter (many free models) → Gemini (fallback)
-
-    All three are completely free with no credit card required.
+    Generates Stoic video scripts using LLM priority chain.
+    Supports short-form (Shorts/Reels) and long-form (Full YouTube).
+    History-aware: passes recent beats to LLM to avoid repetition.
     """
 
     def __init__(self):
@@ -221,7 +303,6 @@ class ScriptEngine:
         self.openrouter = OpenRouterClient()
         self.gemini     = GeminiClient()
 
-        # Log which APIs are available
         available = []
         if self.groq.available():       available.append(f"Groq ({self.groq.model})")
         if self.openrouter.available(): available.append(f"OpenRouter ({self.openrouter.model})")
@@ -229,72 +310,172 @@ class ScriptEngine:
 
         if not available:
             raise ValueError(
-                "❌ No LLM API keys found!\n"
-                "Set at least ONE of: GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY\n"
-                "See CREDENTIALS_SETUP.md for instructions."
+                "No LLM API keys found!\n"
+                "Set at least ONE of: GROQ_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY"
             )
         logger.info(f"[ScriptEngine] Available LLMs: {', '.join(available)}")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def generate_script(self, topic: str, length: str = "short") -> dict:
+    def generate_script(self, topic: str, length: str = "short",
+                         used_beats: list = None) -> dict:
         """
-        Generates a structured Stoic video script.
+        Generates a Stoic video script.
 
         Args:
-            topic: e.g. "Overcoming Fear", "Memento Mori"
-            length: "short" (~35s, 7 beats) | "medium" (~60s, 12 beats)
+            topic:      e.g. "Overcoming Fear"
+            length:     "short" | "medium" | "long_3" | "long_5" | "long_7" | "long_11"
+            used_beats: Beat texts from history (to avoid repetition)
 
         Returns:
             dict: Validated script with title, beats, visual_keywords
         """
-        duration_target = 35 if length == "short" else 60
-        num_beats       = 7  if length == "short" else 12
+        cfg = LENGTH_CONFIG.get(length, LENGTH_CONFIG["short"])
+        video_type   = cfg["type"]
+        duration_s   = cfg["target_s"]
+        total_beats  = cfg["beats"]
 
-        system = SYSTEM_PROMPT
-        user   = _user_prompt(topic, duration_target, num_beats)
+        logger.info(
+            f"[ScriptEngine] Generating '{topic}' | {cfg['label']} "
+            f"| {total_beats} beats | {duration_s}s target"
+        )
 
-        raw_json = self._call_with_fallback(system, user)
-        return self._parse_and_validate(raw_json, topic, duration_target)
+        if video_type == "short":
+            return self._generate_short(topic, duration_s, total_beats, used_beats)
+        else:
+            return self._generate_long(topic, duration_s, total_beats, length, used_beats)
 
-    def _call_with_fallback(self, system: str, user: str) -> str:
-        """Try each LLM in priority order. Raises only if ALL fail."""
+    # ─────────────────────────────────────────────
+    # Short-Form (Shorts / Reels)
+    # ─────────────────────────────────────────────
+
+    def _generate_short(self, topic: str, duration_s: int,
+                          num_beats: int, used_beats: list) -> dict:
+        """Single LLM call for short-form content."""
+        prompt = _short_form_prompt(topic, duration_s, num_beats, used_beats)
+        raw    = self._call_with_fallback(SYSTEM_PROMPT, prompt, max_tokens=2048)
+        return self._parse_and_validate(raw, topic, duration_s)
+
+    # ─────────────────────────────────────────────
+    # Long-Form (Full YouTube)
+    # ─────────────────────────────────────────────
+
+    def _generate_long(self, topic: str, duration_s: int,
+                         total_beats: int, length: str,
+                         used_beats: list) -> dict:
+        """
+        Multi-call generation for long-form videos.
+
+        Strategy: Generate each chapter in a separate LLM call.
+        This keeps each call within token limits and produces
+        better chapter-specific content.
+        """
+        all_beats   = []
+        beat_id     = 1
+        title       = None
+        hook        = None
+        this_chapter_beats = []  # Running list of beats in this video
+
+        for chapter in LONG_FORM_CHAPTERS:
+            # Calculate beats for this chapter
+            chapter_beats = max(3, round(total_beats * chapter["proportion"]))
+            # Adjust last chapter to hit exact total
+            if chapter == LONG_FORM_CHAPTERS[-1]:
+                chapter_beats = max(3, total_beats - len(all_beats))
+
+            # Combine history beats + beats already in this video
+            avoid_beats = list(used_beats or []) + [b["text"] for b in this_chapter_beats]
+
+            logger.info(
+                f"[ScriptEngine] Chapter '{chapter['name']}': "
+                f"{chapter_beats} beats (IDs {beat_id}-{beat_id+chapter_beats-1})"
+            )
+
+            prompt = _long_form_prompt(
+                topic=topic,
+                duration_target=duration_s,
+                num_beats=total_beats,
+                chapter_name=chapter["name"],
+                chapter_intent=chapter["intent"],
+                chapter_beats=chapter_beats,
+                start_id=beat_id,
+                used_beats=avoid_beats[:10],  # Cap to avoid giant prompts
+            )
+
+            raw = self._call_with_fallback(
+                SYSTEM_PROMPT, prompt,
+                max_tokens=min(4096, chapter_beats * 120),
+            )
+            chapter_data = self._parse_and_validate(raw, topic, duration_s)
+
+            # Take title + hook from first chapter only
+            if title is None:
+                title = chapter_data.get("title", f"The {topic}")
+                hook  = chapter_data.get("hook", "")
+
+            chapter_beat_list = chapter_data.get("beats", [])
+
+            # Re-assign IDs sequentially and fix intent to match chapter
+            for i, b in enumerate(chapter_beat_list):
+                b["id"]     = beat_id
+                b["intent"] = chapter["intent"]
+                beat_id += 1
+
+            all_beats.extend(chapter_beat_list)
+            this_chapter_beats.extend(chapter_beat_list)
+            logger.info(f"[ScriptEngine] Chapter '{chapter['name']}' done: {len(chapter_beat_list)} beats")
+
+        result = {
+            "title":           title,
+            "topic":           topic,
+            "duration_target": duration_s,
+            "hook":            hook,
+            "beats":           all_beats,
+        }
+        logger.info(
+            f"[ScriptEngine] Long-form complete: '{title}' "
+            f"— {len(all_beats)} beats total"
+        )
+        return result
+
+    # ─────────────────────────────────────────────
+    # LLM Fallback Chain
+    # ─────────────────────────────────────────────
+
+    def _call_with_fallback(self, system: str, user: str, max_tokens: int = 2048) -> str:
+        """Try each LLM in priority order."""
         errors = []
 
-        # 1. Groq — fastest, try first
         if self.groq.available():
             try:
-                result = self.groq.generate(system, user)
-                logger.info("[ScriptEngine] ✅ Used: Groq")
-                return result
+                r = self.groq.generate(system, user, max_tokens)
+                logger.info("[ScriptEngine] Used: Groq")
+                return r
             except Exception as e:
                 logger.warning(f"[ScriptEngine] Groq failed: {e}")
                 errors.append(f"Groq: {e}")
 
-        # 2. OpenRouter — many free models
         if self.openrouter.available():
             try:
-                result = self.openrouter.generate(system, user)
-                logger.info("[ScriptEngine] ✅ Used: OpenRouter")
-                return result
+                r = self.openrouter.generate(system, user, max_tokens)
+                logger.info("[ScriptEngine] Used: OpenRouter")
+                return r
             except Exception as e:
                 logger.warning(f"[ScriptEngine] OpenRouter failed: {e}")
                 errors.append(f"OpenRouter: {e}")
 
-        # 3. Gemini — last resort
         if self.gemini.available():
             try:
-                result = self.gemini.generate(system, user)
-                logger.info("[ScriptEngine] ✅ Used: Gemini")
-                return result
+                r = self.gemini.generate(system, user, max_tokens)
+                logger.info("[ScriptEngine] Used: Gemini")
+                return r
             except Exception as e:
                 logger.warning(f"[ScriptEngine] Gemini failed: {e}")
                 errors.append(f"Gemini: {e}")
 
-        raise RuntimeError(f"All LLMs failed:\n" + "\n".join(errors))
+        raise RuntimeError("All LLMs failed:\n" + "\n".join(errors))
 
     def _parse_and_validate(self, raw_json: str, topic: str, duration_target: int) -> dict:
-        """Parses LLM JSON response and validates with Pydantic."""
-        # Strip markdown fences if present
+        """Parses LLM JSON, validates with Pydantic."""
         raw_json = raw_json.strip()
         if raw_json.startswith("```"):
             raw_json = re.sub(r"```(?:json)?\n?", "", raw_json).strip("`").strip()
@@ -303,23 +484,22 @@ class ScriptEngine:
             script = Script.model_validate_json(raw_json)
         except Exception as e:
             logger.warning(f"[ScriptEngine] Direct parse failed: {e}")
-            # Try extracting JSON object
             match = re.search(r'\{.*\}', raw_json, re.DOTALL)
             if match:
                 try:
                     script = Script.model_validate_json(match.group())
                 except Exception as e2:
-                    raise ValueError(f"Could not parse JSON: {e2}\nRaw: {raw_json[:300]}")
+                    raise ValueError(f"Cannot parse JSON: {e2}\nRaw: {raw_json[:300]}")
             else:
-                raise ValueError(f"No JSON found in response: {raw_json[:200]}")
+                raise ValueError(f"No JSON in response: {raw_json[:200]}")
 
         result = script.model_dump()
-        logger.info(f"[ScriptEngine] ✅ Script: '{result['title']}' — {len(result['beats'])} beats")
+        logger.info(f"[ScriptEngine] Parsed: '{result['title']}' — {len(result['beats'])} beats")
         return result
 
 
 # ─────────────────────────────────────────────────────────────────
-# Pre-seeded Stoic Topics (30 included)
+# Stoic Topics Library (30 topics — filtered against history)
 # ─────────────────────────────────────────────────────────────────
 
 STOIC_TOPICS = [
@@ -333,9 +513,6 @@ STOIC_TOPICS = [
     "Controlling What You Can Control",
     "The Dichotomy of Control",
     "Ego is the Enemy",
-    "Morning Meditation of Marcus Aurelius",
-    "Seneca on the Shortness of Time",
-    "Epictetus: You Are Your Choices",
     "The View from Above",
     "Negative Visualization",
     "Voluntary Hardship",
@@ -349,10 +526,13 @@ STOIC_TOPICS = [
     "The Power of Stoic Journaling",
     "Virtue is the Only True Good",
     "How Stoics Face Death",
-    "Doing Less, Better",
+    "Doing Less Better",
     "The Philosophy of Enough",
     "Letting Go of What Others Think",
     "The Present Moment is All You Have",
+    "Stillness is the Key",
+    "The Power of Indifference",
+    "Why Comfort is Your Enemy",
 ]
 
 

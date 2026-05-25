@@ -54,10 +54,10 @@ app.mount("/exports", StaticFiles(directory=str(EXPORTS_DIR)), name="exports")
 
 class GenerateRequest(BaseModel):
     topic: str
-    length: str = "short"          # "short" (35s) | "medium" (60s)
+    length: str = "short"          # short|medium|long_3|long_5|long_7|long_11
     aspect_ratio: str = "9:16"     # "9:16" | "16:9" | "1:1"
     voice: str = "gb_ryan"         # Default: Ryan deep British (best for Stoic)
-    fps: int = 30                  # 30fps — smooth on CPU, standard for YouTube Shorts
+    fps: int = 30                  # 30fps — smooth on CPU, standard for YouTube
 
 # ─────────────────────────────────────────────
 # Progress Helper
@@ -182,6 +182,14 @@ async def list_voices():
     return {"voices": get_voice_list()}
 
 
+@app.get("/api/history")
+async def get_history():
+    """Returns content generation history stats + past topics."""
+    from history.history_engine import HistoryEngine
+    h = HistoryEngine()
+    return {"stats": h.get_stats(), "past_topics": h.get_all_topics()}
+
+
 @app.get("/api/health")
 async def health():
     active = sum(1 for j in JOBS.values() if j["state"] == "running")
@@ -223,31 +231,58 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ── Step 1: Script ───────────────────────────────────
-        set_progress(job_id, 1, "✍️ Generating Stoic script (Groq AI)...")
-        from generator.script_engine import ScriptEngine
-        script = ScriptEngine().generate_script(topic=topic, length=length)
+        # ── Step 1: History Check + Script ──────────────────
+        from generator.script_engine import ScriptEngine, LENGTH_CONFIG
+        from history.history_engine import HistoryEngine
+
+        history = HistoryEngine()
+        cfg = LENGTH_CONFIG.get(length, LENGTH_CONFIG["short"])
+        total_steps = 11 if cfg["type"] == "long" else 9  # Long videos have extra steps
+        JOBS[job_id]["total"] = total_steps
+
+        set_progress(job_id, 1, "📚 Checking history (no repeat content)...", total_steps)
+        try:
+            history.check_topic(topic)
+        except ValueError as e:
+            logger.warning(str(e))
+            # Not a hard failure — just warn and continue (user chose this topic)
+            logger.warning("[History] Proceeding despite similarity — user chose topic explicitly")
+
+        # Collect past beats to guide LLM away from repetition
+        past_entries = history._load()
+        used_beats = []
+        for entry in past_entries[-20:]:   # Last 20 videos only
+            used_beats.extend(entry.get("beats", []))
+        used_beats = used_beats[-80:]       # Cap to last 80 beats
+
+        set_progress(job_id, 1, "✍️ Generating Stoic script (AI)...", total_steps)
+        script = ScriptEngine().generate_script(
+            topic=topic, length=length, used_beats=used_beats
+        )
+
+        # Filter duplicate beats from this script
+        script["beats"] = history.filter_beats(script["beats"])
         (job_dir / "script.json").write_text(json.dumps(script, indent=2), encoding="utf-8")
 
         # ── Step 2: TTS ──────────────────────────────────────
-        set_progress(job_id, 2, "🎙️ Synthesizing voice (Kokoro-82M, CPU)...")
+        set_progress(job_id, 2, "🎙️ Synthesizing deep voice (edge-tts + bass chain)...", total_steps)
         from audio.tts_engine import TTSEngine
         audio_path = str(job_dir / "audio.wav")
         TTSEngine(voice=voice).synthesize(script_data=script, output_path=audio_path)
 
         # ── Step 3: Alignment ────────────────────────────────
-        set_progress(job_id, 3, "🔬 Aligning words (WhisperX CPU mode)...")
+        set_progress(job_id, 3, "🔬 Aligning words (WhisperX CPU)...", total_steps)
         from alignment.align_engine import AlignmentEngine
         word_timeline = AlignmentEngine().generate_word_timestamps(audio_path=audio_path)
 
         # ── Step 4: Timeline ─────────────────────────────────
-        set_progress(job_id, 4, "📐 Building master timeline JSON...")
+        set_progress(job_id, 4, "📐 Building master timeline JSON...", total_steps)
         from timeline.timeline_engine import TimelineEngine
         timeline = TimelineEngine().build(script_data=script, word_timeline=word_timeline)
         (job_dir / "timeline.json").write_text(json.dumps(timeline, indent=2), encoding="utf-8")
 
         # ── Step 5: Media ────────────────────────────────────
-        set_progress(job_id, 5, "🎬 Fetching cinematic footage (Pexels/Pixabay)...")
+        set_progress(job_id, 5, "🎬 Fetching cinematic footage (Pexels/Pixabay)...", total_steps)
         from embeddings.faiss_engine import FAISSEngine
         from media.media_engine import FreeMediaEngine
         faiss = FAISSEngine()
@@ -270,7 +305,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             clips.append({"path": path, "duration": dur, "segment": seg})
 
         # ── Step 6: Video ────────────────────────────────────
-        set_progress(job_id, 6, "🎞️ Compositing video (PIL LANCZOS Ken Burns)...")
+        set_progress(job_id, 6, "🎞️ Compositing video (FFmpeg Ken Burns)...", total_steps)
         from video.video_engine import VideoEngine
         raw_video = str(job_dir / "raw_video.mp4")
         VideoEngine(aspect_ratio=aspect_ratio, fps=fps).compose(
@@ -278,7 +313,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         )
 
         # ── Step 7: Captions ─────────────────────────────────
-        set_progress(job_id, 7, "💬 Generating karaoke subtitles (pysubs2 ASS)...")
+        set_progress(job_id, 7, "💬 Generating karaoke subtitles...", total_steps)
         from captions.caption_engine import CaptionEngine
         w, h = {"9:16":(1080,1920),"16:9":(1920,1080),"1:1":(1080,1080)}.get(aspect_ratio,(1080,1920))
         captions_path = str(job_dir / "captions.ass")
@@ -287,7 +322,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         )
 
         # ── Step 8: BGM + Audio Mix ──────────────────────────────
-        set_progress(job_id, 8, "🎵 Fetching Stoic BGM + professional mix...")
+        set_progress(job_id, 8, "🎵 Fetching Stoic BGM + professional mix...", total_steps)
         from audio.bgm_engine import BGMEngine
         from audio.audio_mixer import AudioMixer
 
@@ -306,7 +341,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         )
 
         # ── Step 9: Final Render ─────────────────────────────
-        set_progress(job_id, 9, "🚀 Final FFmpeg render + quality validation...")
+        set_progress(job_id, 9, "🚀 Final FFmpeg render + quality validation...", total_steps)
         final_video = str(job_dir / "final_video.mp4")
         _ffmpeg_render(raw_video, mixed_audio, captions_path, final_video, fps)
 
@@ -332,8 +367,15 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             "validation":   report,
         }
 
-        JOBS[job_id].update({"state": "done", "step": 9, "status": "✅ Complete!", "result": result})
-        logger.info(f"[{job_id[:8]}] ✅ Done → {result['video_url']}")
+        # ── Save to history (after success) ──────────────────
+        try:
+            history.save(script, length=length)
+        except Exception as hist_e:
+            logger.warning(f"[History] Save failed (non-fatal): {hist_e}")
+
+        JOBS[job_id].update({"state": "done", "step": total_steps,
+                              "status": "✅ Complete!", "result": result})
+        logger.info(f"[{job_id[:8]}] Done -> {result['video_url']}") 
 
     except Exception as e:
         logger.error(f"[{job_id[:8]}] ❌ Failed: {e}")
