@@ -90,7 +90,8 @@ class VideoEngine:
             img.close()
             return result
 
-        return clip.fl(effect)
+        # MoviePy 2.x: fl() renamed to transform()
+        return clip.transform(effect)
 
     # ─────────────────────────────────────────────
     # Scene Processing

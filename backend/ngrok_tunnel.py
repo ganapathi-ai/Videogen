@@ -79,6 +79,13 @@ def start_tunnel():
     print(f"{BLUE}[Ngrok]{RESET} Starting tunnel on port {PORT}...")
 
     try:
+        # Kill any existing tunnels first to avoid ERR_NGROK_334
+        try:
+            ngrok.kill()
+            time.sleep(1)
+        except Exception:
+            pass
+
         tunnel = ngrok.connect(PORT, proto="http")
         public_url = tunnel.public_url
 
@@ -87,48 +94,56 @@ def start_tunnel():
             public_url = public_url.replace("http://", "https://", 1)
 
         print(f"""
-{BOLD}{'═'*55}{RESET}
-{CYAN}{BOLD}  🌐 INNER CITADEL — TUNNEL ACTIVE{RESET}
-{'═'*55}
+{'='*55}
+  INNER CITADEL - TUNNEL ACTIVE
+{'='*55}
 
-  {BOLD}Public URL:{RESET}  {GREEN}{public_url}{RESET}
-  {BOLD}Local URL:{RESET}   http://localhost:{PORT}
+  Public URL:  {public_url}
+  Local URL:   http://localhost:{PORT}
 
-  {BOLD}Next Steps:{RESET}
-  1. Copy this URL: {CYAN}{public_url}{RESET}
-  2. Go to Vercel dashboard → Your project → Settings
-  3. Environment Variables → Add:
-       Name:  NEXT_PUBLIC_BACKEND_URL
-       Value: {public_url}
-  4. Redeploy Vercel frontend (or just save)
+  Next Steps:
+  1. Copy this URL: {public_url}
+  2. Vercel dashboard -> Settings -> Environment Variables
+  3. Set NEXT_PUBLIC_BACKEND_URL = {public_url}
+  4. Redeploy your Vercel project
 
-  {BOLD}Or for local dev:{RESET}
-     In frontend/.env.local set:
-     NEXT_PUBLIC_BACKEND_URL={public_url}
-
-{'═'*55}
-{YELLOW}Press Ctrl+C to stop the tunnel{RESET}
+{'='*55}
+Press Ctrl+C to stop
 """)
 
         # Auto-update .env
         update_env_file("BACKEND_URL", public_url)
-        print(f"  {GREEN}✅ .env BACKEND_URL updated automatically{RESET}\n")
+        print(f"  .env BACKEND_URL updated automatically\n")
 
         # Keep alive
         try:
             while True:
                 time.sleep(10)
         except KeyboardInterrupt:
-            print(f"\n{YELLOW}[Ngrok] Stopping tunnel...{RESET}")
+            print(f"\n[Ngrok] Stopping tunnel...")
             ngrok.disconnect(tunnel.public_url)
             ngrok.kill()
-            print(f"{GREEN}[Ngrok] Tunnel closed.{RESET}")
+            print(f"[Ngrok] Tunnel closed.")
 
     except Exception as e:
-        print(f"{RED}❌ Tunnel error: {e}{RESET}")
-        if "auth" in str(e).lower():
-            print(f"   Get free token: https://dashboard.ngrok.com/get-started/your-authtoken")
-        sys.exit(1)
+        print(f"Tunnel error: {e}")
+        # Try to get existing tunnel URL if already running
+        try:
+            tunnels = ngrok.get_tunnels()
+            if tunnels:
+                existing_url = tunnels[0].public_url
+                if existing_url.startswith("http://"):
+                    existing_url = existing_url.replace("http://", "https://", 1)
+                print(f"\n  Reconnected to existing tunnel: {existing_url}")
+                print(f"  Copy this URL to Vercel as NEXT_PUBLIC_BACKEND_URL\n")
+                update_env_file("BACKEND_URL", existing_url)
+                while True:
+                    time.sleep(10)
+            else:
+                print(f"  Get free token: https://dashboard.ngrok.com")
+                sys.exit(1)
+        except Exception:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

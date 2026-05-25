@@ -124,9 +124,9 @@ export default function HomePage() {
         throw new Error(err.detail || "Failed to start generation");
       }
 
-      const { task_id } = await resp.json();
-      setTaskId(task_id);
-      startSSEStream(task_id);
+      const { job_id } = await resp.json();   // backend returns job_id
+      setTaskId(job_id);
+      startSSEStream(job_id);
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Connection failed";
@@ -202,7 +202,7 @@ export default function HomePage() {
             {/* Feature pills */}
             <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 10, marginTop: 24 }}>
               {[
-                "Gemini AI Script", "Kokoro-82M Voice", "WhisperX Alignment",
+                "Groq AI Script", "Edge-TTS Voice", "WhisperX Align",
                 "Ken Burns Video", "Karaoke Subtitles", "60fps H.264",
               ].map(f => (
                 <span key={f} style={{
