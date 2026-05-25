@@ -35,19 +35,20 @@ class TTSEngine:
         logger.info(f"[TTS] Voice: {VOICE_PRESETS[self.voice]['desc']} | Device: CPU")
 
     def _load(self):
-        """Lazy-load Kokoro pipeline on first call."""
+        """Lazy-load Kokoro pipeline on first call (kokoro 0.7.x for Python 3.13)."""
         if self._pipeline is not None:
             return
         try:
-            # Force CPU — no CUDA, no Intel Arc
+            # Force CPU — no CUDA
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             from kokoro import KPipeline
-            self._pipeline = KPipeline(lang_code="a", device="cpu")
-            logger.info("[TTS] ✅ Kokoro-82M loaded on CPU")
+            # kokoro 0.7.x: no device param — always CPU when CUDA not available
+            self._pipeline = KPipeline(lang_code="a")
+            logger.info("[TTS] Kokoro 0.7.x loaded on CPU")
         except ImportError:
             raise ImportError(
                 "Kokoro not installed. Run:\n"
-                "  pip install kokoro soundfile\n"
+                "  pip install kokoro==0.7.16 soundfile\n"
                 "The model (~300MB) downloads automatically on first use."
             )
 
@@ -84,14 +85,22 @@ class TTSEngine:
             logger.debug(f"[TTS] Beat {i+1}: '{text[:50]}...'")
 
             try:
-                # Generate audio for this beat
+                # kokoro 0.7.x API: generator yields (graphemes, phonemes, audio)
                 audio_chunks = []
-                for _, _, audio in self._pipeline(text, voice=self.voice, speed=0.88):
-                    if audio is not None:
-                        audio_chunks.append(audio)
+                generator = self._pipeline(
+                    text,
+                    voice=self.voice,
+                    speed=0.88
+                )
+                for gs, ps, audio in generator:
+                    if audio is not None and len(audio) > 0:
+                        audio_chunks.append(
+                            audio if isinstance(audio, np.ndarray)
+                            else np.array(audio, dtype=np.float32)
+                        )
 
                 if audio_chunks:
-                    beat_audio = np.concatenate(audio_chunks)
+                    beat_audio = np.concatenate(audio_chunks).astype(np.float32)
                     segments.append(beat_audio)
 
                     # Longer pause after hook and close beats
