@@ -286,14 +286,24 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             timeline=timeline, output_path=captions_path
         )
 
-        # ── Step 8: Audio Mix ────────────────────────────────
-        set_progress(job_id, 8, "🎵 Mixing audio + BGM (emotion-based ducking)...")
+        # ── Step 8: BGM + Audio Mix ──────────────────────────────
+        set_progress(job_id, 8, "🎵 Fetching Stoic BGM + professional mix...")
+        from audio.bgm_engine import BGMEngine
         from audio.audio_mixer import AudioMixer
+
+        # Get dominant emotions from timeline for BGM selection
+        emotions = [seg.get("emotion", "deep") for seg in timeline.get("segments", [])]
+
+        bgm_engine = BGMEngine(api_key=os.getenv("FREESOUND_API_KEY", ""))
+        bgm_path   = bgm_engine.get_track(emotions, timeline.get("duration", 30.0))
+
         mixed_audio = str(job_dir / "audio_mixed.wav")
-        bgm_files = list((Path(__file__).parent / "assets" / "bgm").glob("*.mp3"))
-        bgm = str(bgm_files[0]) if bgm_files else audio_path
-        AudioMixer().mix(voice_path=audio_path, bgm_path=bgm,
-                         timeline=timeline, output_path=mixed_audio)
+        AudioMixer().mix(
+            voice_path=audio_path,
+            bgm_path=bgm_path,
+            timeline=timeline,
+            output_path=mixed_audio,
+        )
 
         # ── Step 9: Final Render ─────────────────────────────
         set_progress(job_id, 9, "🚀 Final FFmpeg render + quality validation...")
