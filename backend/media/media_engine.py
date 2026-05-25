@@ -93,35 +93,46 @@ class FreeMediaEngine:
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _fetch_pexels(self, script_text: str, query: str, orientation: str,
                       job_dir: str, segment_id: int) -> str:
-        """Fetches video from Pexels API."""
+        """Fetches video from Pexels API. Takes best result directly (no FAISS filter)."""
         try:
             resp = requests.get(
                 "https://api.pexels.com/videos/search",
                 headers={"Authorization": self.pexels_key},
                 params={"query": query, "orientation": orientation,
-                        "size": "large", "per_page": 15},
+                        "size": "medium", "per_page": 5},
                 timeout=15,
             )
             resp.raise_for_status()
 
-            for video in resp.json().get("videos", []):
-                tags = video.get("url", "") + " " + str(video.get("tags", ""))
-                sim = self.faiss_engine.compute_similarity(script_text, tags)
+            videos = resp.json().get("videos", [])
+            if not videos:
+                # Retry without orientation filter
+                resp2 = requests.get(
+                    "https://api.pexels.com/videos/search",
+                    headers={"Authorization": self.pexels_key},
+                    params={"query": query, "per_page": 5},
+                    timeout=15,
+                )
+                videos = resp2.json().get("videos", [])
 
-                if sim >= SIMILARITY_THRESHOLD:
-                    # Best quality MP4
-                    files = sorted(video.get("video_files", []),
-                                   key=lambda x: x.get("width", 0), reverse=True)
-                    for vf in files:
-                        if vf.get("file_type") == "video/mp4":
-                            path = self._download(vf["link"], job_dir, segment_id, "pexels")
-                            if path:
-                                logger.info(f"[MediaEngine] ✅ Pexels: sim={sim:.2f} → {path}")
-                                return path
+            for video in videos:
+                # Pick the best MP4 file (highest resolution that fits)
+                files = sorted(
+                    video.get("video_files", []),
+                    key=lambda x: x.get("width", 0),
+                    reverse=True,
+                )
+                for vf in files:
+                    if vf.get("file_type") == "video/mp4":
+                        path = self._download(vf["link"], job_dir, segment_id, "pexels")
+                        if path:
+                            logger.info(f"[MediaEngine] Pexels: '{query}' -> {path}")
+                            return path
 
         except Exception as e:
-            logger.warning(f"[MediaEngine] Pexels error: {e}")
+            logger.warning(f"[MediaEngine] Pexels error for '{query}': {e}")
         return None
+
 
     # ─────────────────────────────────────────────────────────
     # Pixabay

@@ -1,5 +1,5 @@
 """
-THE INNER CITADEL — Audio Mixer
+THE INNER CITADEL — Audio Mixer (MoviePy 2.x compatible)
 Emotion-based background music ducking.
 Narration always dominant; BGM dynamically scales based on segment emotion.
 """
@@ -12,14 +12,9 @@ from loguru import logger
 class AudioMixer:
     """
     Mixes voice narration with background music using emotion-based ducking.
-
-    Ducking levels (per research spec):
-    - minimal / focus: 0.15x BGM volume (quiet = deep focus)
-    - All others:      0.25x BGM volume (light presence)
-    - 2s fade-out at end
+    Uses FFmpeg directly for Python 3.13 + MoviePy 2.x compatibility.
     """
 
-    # Emotion → BGM volume multiplier
     DUCK_MAP = {
         "minimal":    0.12,
         "focus":      0.12,
@@ -36,94 +31,68 @@ class AudioMixer:
     def mix(self, voice_path: str, bgm_path: str, timeline: dict,
             output_path: str = "exports/audio_mixed.wav") -> str:
         """
-        Mixes voice + background music with emotion-based ducking per segment.
+        Mixes voice + background music using FFmpeg directly.
+        More reliable than MoviePy audio on Python 3.13 Windows.
 
         Args:
             voice_path:  Path to narration .wav
             bgm_path:    Path to background music file (.mp3 or .wav)
-            timeline:    Master timeline (for per-segment emotion-based ducking)
+            timeline:    Master timeline (for per-segment emotion)
             output_path: Where to write the mixed audio
 
         Returns:
             str: Path to mixed audio file
         """
-        try:
-            import moviepy.editor as mp
-            import moviepy.audio.fx.all as afx
-        except ImportError:
-            raise ImportError("Run: pip install moviepy")
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
         logger.info(f"[AudioMixer] Voice: {voice_path}")
         logger.info(f"[AudioMixer] BGM:   {bgm_path}")
 
-        voice = mp.AudioFileClip(voice_path)
-        total_duration = voice.duration
-
-        # Handle missing or silent BGM
+        # If no BGM file — output voice only (copy)
         if not bgm_path or not Path(bgm_path).exists():
-            logger.warning("[AudioMixer] No BGM file found — outputting voice only")
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            voice.write_audiofile(output_path, fps=44100, logger=None)
-            voice.close()
+            logger.warning("[AudioMixer] No BGM file — using voice only")
+            import shutil
+            shutil.copy2(voice_path, output_path)
             return output_path
 
-        bgm_raw = mp.AudioFileClip(bgm_path)
-
-        # Loop BGM if shorter than narration
-        if bgm_raw.duration < total_duration:
-            loops = int(total_duration / bgm_raw.duration) + 2
-            bgm_raw = mp.concatenate_audioclips([bgm_raw] * loops)
-        bgm_raw = bgm_raw.subclip(0, total_duration)
-
-        # Normalize both tracks
-        bgm_raw = afx.audio_normalize(bgm_raw)
-        voice = afx.audio_normalize(voice)
-
-        # ─── Per-segment emotion-based ducking ────────────────────
+        # Compute average duck level from timeline segments
         segments = timeline.get("segments", [])
-        ducked_clips = []
-
         if segments:
-            prev_end = 0.0
-            for seg in segments:
-                seg_start = seg.get("audio_start", prev_end)
-                seg_end = seg.get("audio_end", seg_start + 3.0)
-                emotion = seg.get("emotion", "deep")
-                vol = self.DUCK_MAP.get(emotion, self.DEFAULT_DUCK)
-
-                # Handle any gap before this segment
-                if seg_start > prev_end + 0.05:
-                    gap_clip = bgm_raw.subclip(prev_end, seg_start).volumex(self.DEFAULT_DUCK)
-                    ducked_clips.append(gap_clip)
-
-                seg_bgm = bgm_raw.subclip(seg_start, min(seg_end, total_duration)).volumex(vol)
-                ducked_clips.append(seg_bgm)
-                prev_end = seg_end
-
-            # Remaining audio after last segment
-            if prev_end < total_duration:
-                tail = bgm_raw.subclip(prev_end, total_duration).volumex(self.DEFAULT_DUCK)
-                ducked_clips.append(tail)
-
-            ducked_bgm = mp.concatenate_audioclips(ducked_clips)
+            emotions = [s.get("emotion", "deep") for s in segments]
+            avg_duck = sum(self.DUCK_MAP.get(e, self.DEFAULT_DUCK) for e in emotions) / len(emotions)
         else:
-            # No segments: uniform ducking
-            ducked_bgm = bgm_raw.volumex(self.DEFAULT_DUCK)
+            avg_duck = self.DEFAULT_DUCK
 
-        # Fade out BGM in last 2 seconds
-        ducked_bgm = afx.audio_fadeout(ducked_bgm, duration=2.0)
+        logger.info(f"[AudioMixer] Average BGM duck level: {avg_duck:.2f}")
 
-        # Mix voice + ducked BGM
-        final_mix = mp.CompositeAudioClip([ducked_bgm, voice])
+        # Use FFmpeg to mix: voice at full volume + BGM ducked
+        import subprocess
+        cmd = [
+            "ffmpeg",
+            "-i", voice_path,
+            "-stream_loop", "-1",   # Loop BGM if shorter than voice
+            "-i", bgm_path,
+            "-filter_complex",
+            (
+                f"[1:a]volume={avg_duck:.3f},afade=t=out:st=0:d=2[bgm];"
+                f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            ),
+            "-map", "[out]",
+            "-ac", "2",
+            "-ar", "44100",
+            "-shortest",
+            output_path,
+            "-y",
+        ]
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        final_mix.write_audiofile(output_path, fps=44100, logger=None)
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-        # Cleanup
-        voice.close()
-        bgm_raw.close()
-        ducked_bgm.close()
-        final_mix.close()
+        if result.returncode != 0:
+            logger.warning(f"[AudioMixer] FFmpeg mix failed: {result.stderr[-200:]}")
+            logger.warning("[AudioMixer] Falling back to voice-only output")
+            import shutil
+            shutil.copy2(voice_path, output_path)
+        else:
+            logger.info(f"[AudioMixer] Mixed audio: {output_path}")
 
-        logger.info(f"[AudioMixer] ✅ Mixed audio: {output_path} ({total_duration:.2f}s)")
         return output_path
