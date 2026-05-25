@@ -1,0 +1,56 @@
+# THE INNER CITADEL — Git Ignore
+
+# Dependencies
+node_modules/
+.next/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment (NEVER commit real keys)
+.env
+.env.local
+.env.production
+
+# Generated outputs
+exports/
+cache/
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Build
+dist/
+build/
+.next/
+out/
+
+# Python environments
+venv/
+.venv/
+env/
+
+# Media (generated)
+*.wav
+*.mp4
+*.ass
+*.mp3
+*.jpg
+*.png
+backend/assets/bgm/*.mp3
+
+# System
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Marker files
+backend/.deps_installed
+
+# Package lock (optional — remove if you want to track it)
+# package-lock.json

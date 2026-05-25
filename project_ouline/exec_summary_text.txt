@@ -1,0 +1,316 @@
+Executive Summary
+We propose a fully open-source, cost-free architecture for the Inner Citadel video pipeline. The frontend and lightweight API run on Vercel (free tier) or similar, while all heavy lifting is done by open-source tools on CPUs/GPUs you control. Natural language generation uses open LLMs (e.g. Llama 2[1] via Hugging Face or local inference), and text-to-speech uses open toolkits (e.g. Coqui TTS[2]). Videos and subtitles are composed with FFmpeg/MoviePy and pysubs2 – all free. Stock media is fetched via free APIs (Pexels/Pixabay) or open datasets. The entire pipeline is orchestrated with a job queue (Redis/Celery) and containerized with Docker. Output (videos, captions) is stored in object storage (S3/MinIO/Cloudflare R2) behind a CDN. A GitHub Actions + Docker CI/CD deploys the web app and backend. Throughout, we enforce strict synchronization (audio vs. video durations, caption overlap, etc.) and content uniqueness (via sentence embeddings). This design achieves “production-grade” quality without any paid services.
+Architecture Options
+We compare three approaches, focusing on open-source tooling:
+Recommendation: A hybrid open-source design. Run the website and API endpoints on Vercel (React/Next.js), and offload CPU/GPU-intensive tasks to open-source workers you control (e.g. a local machine, free Google Colab GPU, or a small cloud VM). Breaking the pipeline into microservices avoids serverless timeouts: each task (LLM → TTS → align → render) runs independently and sequentially, managed by a queue[4][5]. This mirrors best practices: use event-driven functions for orchestration, while performing heavy work on persistent instances (no “bill shock”)[3][4].
+Recommended Stack (All Open/Free)
+Frontend (UI): Next.js (React) on Vercel (free tier). Static pages and a few API routes.
+API: Vercel Serverless Functions (Node/Python) for endpoints like POST /generate and GET /status.
+LLM (Script Generation): Open-source LLMs (e.g. Llama 2 on Hugging Face[1], or alternatives like Mistral/FLAN-T5) via Python (e.g. transformers).
+Embeddings/Dedupe: SentenceTransformers + FAISS for vector similarity (open)[6].
+TTS: Coqui TTS (MPL-2.0) – a toolkit with ready models for high-quality speech[2]. (Alternatively OpenTTS, Mimic3, or Mozilla TTS.)
+Alignment: WhisperX (open) for forced alignment word timings.
+Video Composition: MoviePy and FFmpeg (both open, widely used) for cropping, zooms, concatenation.
+Subtitles: pysubs2 (open) for ASS subtitle generation and styling.
+Audio Mixing: MoviePy’s audio effects (free) to duck background music (open audio or CC0 tracks) under the voice.
+Stock Media: Free APIs with CC0 content – Pexels API and Pixabay API (both free to use). Alternatively Unsplash for images, or generative (Stable Diffusion) for visuals.
+Data Store: Object storage: AWS S3 (free tier ~5 GB) or MinIO on-prem; Cloudflare R2 has a free tier. Metadata in SQLite or PostgreSQL.
+Queue & Orchestration: Redis (open, free) with RQ or Celery for Python tasks[5]. Inngest or Vercel Workflows (in preview) could also orchestrate steps without custom infrastructure.
+Infrastructure: Docker for local dev; GitHub Actions to test/build; Vercel Git integration for deployment.
+This stack uses only open-source tools and free services. For example, Coqui TTS provides state-of-art voices for free[2], and Llama 2 weights can be downloaded (subject to license) for any use[1]. No proprietary API calls are needed.
+Master-Timeline JSON Schema
+Define a strict JSON format so that every component (audio, visuals, captions) reads the same timeline. Example:
+{
+  "title": "Inner Citadel: Overcome Fear",
+  "duration": 36.5,
+  "segments": [
+    {
+      "id": 1,
+      "text": "The obstacle is the way.",
+      "audio_start": 0.20,
+      "audio_end": 3.80,
+      "visual_start": 0.00,
+      "visual_end": 3.80,
+      "caption_start": 0.20,
+      "caption_end": 3.80,
+      "emotion": "inspiring",
+      "visual_query": ["roman road", "sunrise"],
+      "music_mood": "dramatic"
+    },
+    {
+      "id": 2,
+      "text": "Focus your mind, your inner citadel awaits.",
+      "audio_start": 4.00,
+      "audio_end": 8.50,
+      "visual_start": 3.80,
+      "visual_end": 8.50,
+      "caption_start": 4.00,
+      "caption_end": 8.50,
+      "emotion": "steady",
+      "visual_query": ["zen garden", "calm temple"],
+      "music_mood": "calm"
+    }
+    // ... more segments ...
+  ]
+}
+Each segment (“beat”) has exact start/end times from the aligned audio. All tools derive timing from this single source of truth: visuals display at visual_start/end, captions at caption_start/end, and audio is pre-cut accordingly. This guarantees frame-perfect sync. For instance, if audio_end - audio_start = visual_end - visual_start, the video length matches the audio exactly.
+API Design (Endpoints, Auth, Rate Limits)
+POST /api/generate: Starts a job. Body: e.g. { "topic": "Stoicism Anxiety", "options": { ... } }. Returns { job_id, status:"queued" }.
+GET /api/status?job_id=XYZ: Checks progress. Returns JSON with status: pending|running|done|failed and optional progress details (percent of steps).
+GET /api/result?job_id=XYZ: When done, returns { video_url, captions_url, timeline_url } (signed CDN links). Or error if not ready.
+GET /api/timeline?job_id=XYZ: (Optional) Returns the master-timeline JSON for preview/dry-run.
+Auth/Rate: Protect with a simple API key or JWT. Implement rate limits (e.g. 5 req/min) to avoid abuse.
+Each API call is lightweight. The heavy work is done asynchronously after queuing. The frontend can poll /status to update progress bars, then fetch /result when done.
+Storage and CDN Strategy
+Object Storage: Save outputs in AWS S3 (free tier) or a self-hosted MinIO. For example, store videos under s3://inner-citadel-exports/YYYYMMDD_id.mp4. Metadata (title, duration) goes in the DB[7].
+Tiered Storage: Move old videos to Glacier/Archive if long-term; keep recent in hot storage.
+CDN: Use CloudFront or Cloudflare in front of S3 for low-latency delivery[8]. Set long Cache-Control headers since each video is unique and unchanging.
+Signed URLs: Provide frontends with signed S3 URLs (or presigned Cloudflare tokens) so only authorized users can download.
+Thumbnails/Previews: Auto-generate a JPEG thumbnail (e.g. frame at 5s) and upload it for the UI. These can be cached similarly.
+Caching: Static assets (CSS, JS) live on Vercel CDN automatically. For videos, the CDN ensures first request fetches from origin once, then caches globally[8].
+On-device Cache: Use Redis or in-memory cache for temporary data if needed (e.g. embedding cache), though primary storage is S3. Redis will mainly be for the queue state.
+This approach follows best practices: videos (large blobs) go to object storage[7], and are served via CDN[8]. Metadata in a database keeps track of status, and the system can scale by increasing storage as needed.
+Job Queue & Orchestration
+We recommend Redis + RQ or Celery for a simple, free queue. The flow:
+Enqueue: API endpoint pushes a job into Redis (including the topic and options).
+Worker Pool: One or more Python worker processes (Docker containers) poll Redis. Each worker performs all steps of the pipeline for its job:
+LLM script → TTS → alignment → timeline → fetch images/video → render → upload.
+Status Tracking: The worker updates job status (in Redis or DB) after each stage. The frontend polls status.
+Failures & Retries: If a stage fails (e.g. model error, network glitch), catch exception and either retry or mark job as failed. Because each stage is idempotent (given same inputs) the worker can safely retry without corrupting state.
+By design, each step runs under a time limit well below serverless timeouts[3]. For example, generating the script and audio might take seconds, and ffmpeg render might take a minute. Even at 100 videos/day, a few concurrent workers suffice, and one can add more if needed.
+Example Orchestration (Mermaid)
+sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant API as Vercel API
+    participant Q as Redis Queue
+    participant W as Worker
+    participant S as Storage/CDN
+
+    U->>FE: Click "Generate"
+    FE->>API: POST /api/generate
+    API->>Q: Enqueue {topic,...}
+    API-->>FE: {"job_id":123,"status":"queued"}
+    FE->>U: Show job queued
+
+    loop Poll every few seconds
+        FE->>API: GET /api/status?job_id=123
+        API-->>FE: {"status":"running","progress":...}
+    end
+
+    W->>Q: Dequeue job 123
+    W->>W: Generate script (LLM)
+    W->>W: Synthesize TTS (Coqui)
+    W->>W: Align words (WhisperX)
+    W->>W: Build master timeline
+    W->>W: Fetch images/videos (Pexels/Pixabay)
+    W->>W: Compose video (MoviePy/FFmpeg)
+    W->>S: Upload MP4, .ass, .json
+    W->>API: Mark job done
+
+    FE->>API: GET /api/status?job_id=123
+    API-->>FE: {"status":"done"}
+    FE->>U: Show "Video ready" with download link
+    ```
+
+This diagram shows the asynchronous flow: User triggers job, the worker pulls it and processes, then results are saved to storage for the user to download.  
+
+# Open-Source Pipeline Details
+
+### Topic & Script Generation  
+Use an open LLM (e.g. [Llama-2 7B](https://huggingface.co/meta-llama/Llama-2-7b)[1]) to generate the video script. Prompt it carefully (with system instructions) to output JSON matching our **Segment schema** (e.g. using `jsonschema` validation in code). Ensure each sentence is short (5–10 words) and follows the Hook–Pain–Insight–Action structure. Optionally fine-tune or use a chat model (Alpaca, Mistral) for better coherency.  
+
+Perform **embedding-based deduplication**: compute a vector for the final script (using Sentence-Transformers) and check against a FAISS index of previous scripts. If similarity >0.82, regenerate or alter phrasing. The doc’s `TopicEngine` (above) shows this logic. This ensures novelty.
+
+### TTS (Audio Synthesis)  
+Feed the combined script text to a TTS pipeline like **Coqui TTS** (Montreal VITS, Glow-TTS, etc.). These libraries have pretrained voices and support varying speed/emotion. Generate `audio.wav` at 24 kHz or 48 kHz. Coqui models can produce natural prosody, avoiding the “robotic” sound. Alternatively, [Tortoise TTS](https://github.com/neonbjb/tortoise-tts) or [Mimic3](https://github.com/MycroftAI/mimic3) are free options. No API keys needed.
+
+### Forced Alignment  
+Use **WhisperX** to align text with the audio. It runs OpenAI’s Whisper model and then refines timings via a phoneme aligner. Example:  
+```python
+
+import whisperx
+result = whisperx.load_model("large-v2").transcribe("exports/audio.wav")
+aligned = whisperx.load_align_model(result["language"], device="cuda")
+word_timestamps = whisperx.align(result["segments"], aligned, metadata=result["alignment"])
+This yields word-level timestamps. We trust WhisperX (open source) to give <20ms accuracy.
+Master Timeline Assembly
+Combine the script and word timestamps into the final timeline JSON. For each segment in the script, slice the corresponding words from the aligned output. The timeline engine (as above) sets each segment’s audio_start/end from the first/last word, and copies that to caption_*. Now duration = last_word_end. This JSON is exported for use by all stages.
+Visuals (Image/Video Search)
+Query stock video/image APIs using the segment’s visual_query keywords. The Pexels and Pixabay APIs are free (sign up for a key). For each segment, fetch a high-quality vertical (9:16) clip matching the tone. As a fallback, use unsplash images or Stable Diffusion (open model) to generate an art asset. We then compute a semantic score (cosine similarity via embeddings) between the scene description and the script to pick the best fit (reject if <0.82). This mimics the doc’s VideoMatchingEngine. Save the chosen media locally for rendering.
+Video Rendering & Effects
+Using MoviePy (open) and FFmpeg: load each scene clip as a VideoFileClip. Resize/crop to 1080×1920, 60fps. Apply subtle Ken Burns effects (slow zoom, pan) using clip.fx( vfx.zoom_in ) or custom transforms. Concatenate in order: concatenate_videoclips(clips, method="compose"). This finalizes the visuals. All operations are local, no proprietary software.
+Captions (ASS)
+Use pysubs2 to write an Advanced SubStation Alpha file. Define a style (font Montserrat, white on black outline). For each segment’s words, we can animate them: e.g. split into chunks of 3–4 words, and for each chunk create overlapping subtitle events where the “active” word is bright and others dimmed (as per the doc’s code). This adds a dynamic highlight effect. The start/end times for each word come from the timeline JSON. Finally, subs.save("video.ass"). MoviePy/FFmpeg can burn in ASS natively if desired.
+Audio Mixing
+Load audio.wav (the narration) and background music (royalty-free or CC0 track). Normalize both. Apply “ducking” so narration is louder: e.g. multiply music by 0.2 when voice is on. The emotional intent (Hook=high, Pain=medium) can adjust ducking more or less. MoviePy allows mixing clips:
+
+voice = AudioFileClip("audio.wav")
+music = AudioFileClip("ambient.mp3").subclip(0, voice.duration)
+music = afx.audio_normalize(music)
+mixed = CompositeAudioClip([ music.volumex(0.2), voice ]) 
+mixed.write_audiofile("exports/audio_mixed.wav")
+This ensures clear speech with cinematic music, all with open libraries.
+Final Composition
+Combine video and mixed audio with FFmpeg. Example:
+
+ffmpeg -i video_temp.mp4 -i exports/audio_mixed.wav \
+ -c:v libx264 -preset slow -b:v 8M -c:a aac -movflags +faststart \
+ -vf "fps=60" exports/final_video.mp4
+Also capture a thumbnail: ffmpeg -i exports/final_video.mp4 -ss 5 -vframes 1 exports/thumbnail.jpg. Save metadata (title, tags) in a JSON for uploading to YouTube later.
+Costs and Scaling
+Since all tools are free, costs are zero beyond your compute. If you run on your own machine, it’s purely electricity. If you need more horsepower, you could use free Google Colab GPUs (12h sessions) or repurpose an old gaming PC. For 1–10 videos/day, a mid-range GPU (e.g. NVIDIA RTX 3060) can handle it. At 100 videos/day, you could distribute across multiple machines or run jobs overnight.
+Key: no paid APIs or cloud services are required. For example, Pexels/Pixabay APIs have unlimited free quotas for non-commercial use[9][10]. Storage like AWS S3 has a free tier (5 GB) which is plenty for dozens of short videos, and Cloudflare R2 offers free storage as well.
+If scaling to hundreds/day, you’d eventually need either more hardware or paid cloud GPUs, but initial usage is free.
+Validation & Quality Checks
+Before finalizing, run automated validation:
+Duration Check: Confirm |video_duration − audio_duration| < 0.1s. (Ensures sync.)
+Caption Check: Ensure subtitle events cover all speech with no gaps and no overlapping events beyond formatting. Pysubs2 can parse and check overlaps.
+Black Frame Detection: Inspect the rendered video for any all-black frames (rare if cropping done right).
+Semantic/Synchrony Scores: Compute a “sync_score” (e.g. 100% − 100×abs mismatch) and “semantic_score” between script and scene descriptors (using embeddings). If scores dip below threshold (e.g. 95%), trigger a re-run or manual review.
+Deduplication: Check script embeddings vs past. If a near-duplicate appears, regenerate with a new random seed or topic tweak.
+These gates catch issues (like a Whisper alignment error or a failed video fetch) early. Failing jobs can be re-queued or logged. Monitoring of queue lengths and error logs (via Prometheus/Grafana or simple alerts) helps maintain reliability.
+Folder Structure & CI/CD
+Example Repository Layout:
+inner_citadel/
+├── frontend/             # Next.js app (Vercel)
+│   ├── pages/
+│   ├── components/
+│   └── package.json
+├── backend/              # Python pipeline code
+│   ├── config/          # JSON schemas, prompts, constants
+│   ├── generator/       # LLM script generation code
+│   ├── tts/             # TTS synthesis (Coqui pipelines)
+│   ├── align/           # WhisperX alignment code
+│   ├── video/           # MoviePy/FFmpeg rendering code
+│   ├── captions/        # pysubs2 ASS writing
+│   ├── validator/       # Validation checks
+│   ├── main.py          # Orchestration (Celery tasks or similar)
+│   └── requirements.txt 
+├── Dockerfile           # Python environment (with CUDA for GPU)
+├── docker-compose.yml   # (Optional) Redis + worker service
+├── .env.example         # API keys (Pexels, Pixabay, DB URL)
+└── .github/workflows/   # CI/CD (lint, test, build Docker)
+CI/CD: Use GitHub Actions to lint (flake8, mypy), run unit tests (pytest for sync code), and build the Docker image. On merge to main, auto-deploy frontend to Vercel (via git integration). Backend can be deployed by pushing the Docker image to a server or using a platform like Railway (free tier) or Render (free for small services).
+Environments: Store API keys (PEXELS_KEY, PIXABAY_KEY) and configs as GitHub secrets or in Vercel’s env settings. Never hardcode secrets.
+Local Dev: Provide a docker-compose.yml with Redis + worker + maybe a watch on backend code. Developers can run one command to spin up everything locally.
+Folder Conventions: Static assets (fonts, overlays) in /backend/assets. Temporary outputs in /backend/exports (mounted volume). The UI calls /api/ routes defined in the Next.js app (which proxy to the queue).
+CLI/Web UI Flows
+Web UI: A simple page lets you enter a topic and click “Generate”. A progress bar updates via polling /status. Once complete, show “Download” buttons for video and captions (pointing to CDN links). Also offer “Preview Timeline” to view the JSON before final video.
+CLI: For advanced use, a Python script (using argparse) can run the pipeline end-to-end or in stages. Example:
+$ python main.py --topic "Stoicism Resilience" --dry-run
+prints the JSON timeline without rendering. --batch input.txt could process multiple topics from a file.
+Error Handling: Both UI and CLI should display error messages if something fails. For example, “Failed: TTS model not found” or “No video found for scene 3 – please try again.” Always log traceback on backend for diagnostics.
+Example Master-Timeline JSON (Packed with Data)
+Below is an example timeline JSON (once again) to illustrate the schema. All timings are hypothetical:
+{
+  "title": "Inner Citadel: Fearlessness",
+  "duration": 30.5,
+  "segments": [
+    {
+      "id": 1,
+      "text": "The obstacle is the way.",
+      "audio_start": 0.20,
+      "audio_end": 3.75,
+      "visual_start": 0.00,
+      "visual_end": 3.75,
+      "caption_start": 0.20,
+      "caption_end": 3.75,
+      "emotion": "inspiring",
+      "visual_query": ["ancient road", "sunset"],
+      "music_mood": "dramatic"
+    },
+    {
+      "id": 2,
+      "text": "Your mind is your fortress.",
+      "audio_start": 4.00,
+      "audio_end": 8.10,
+      "visual_start": 3.75,
+      "visual_end": 8.10,
+      "caption_start": 4.00,
+      "caption_end": 8.10,
+      "emotion": "steady",
+      "visual_query": ["meditating monk", "storm clearing"],
+      "music_mood": "calm"
+    },
+    {
+      "id": 3,
+      "text": "Stay calm amid the chaos.",
+      "audio_start": 8.30,
+      "audio_end": 12.50,
+      "visual_start": 8.10,
+      "visual_end": 12.50,
+      "caption_start": 8.30,
+      "caption_end": 12.50,
+      "emotion": "reassuring",
+      "visual_query": ["calm sea", "thunderstorm distance"],
+      "music_mood": "hopeful"
+    },
+    {
+      "id": 4,
+      "text": "Discipline conquers every fear.",
+      "audio_start": 12.80,
+      "audio_end": 17.00,
+      "visual_start": 12.50,
+      "visual_end": 17.00,
+      "caption_start": 12.80,
+      "caption_end": 17.00,
+      "emotion": "resolute",
+      "visual_query": ["mountain summit", "sunrise"],
+      "music_mood": "uplifting"
+    }
+  ]
+}
+Example API Interaction
+Request (web UI):
+
+POST /api/generate
+Content-Type: application/json
+
+{
+  "topic": "Stoicism Anxiety",
+  "options": {
+    "voice": "neutral_male",
+    "fps": 60
+  }
+}
+Response: { "job_id": "abc123", "status": "queued" }
+Polling Status:
+
+GET /api/status?job_id=abc123
+Possible JSON:
+
+{
+  "job_id": "abc123",
+  "status": "running",
+  "progress": { "script": 100, "audio": 70, "render": 10 }
+}
+Completion:
+
+GET /api/result?job_id=abc123
+Yields:
+
+{
+  "status": "done",
+  "video_url": "https://cdn.example.com/inner-citadel/abc123.mp4",
+  "captions_url": "https://cdn.example.com/inner-citadel/abc123.ass",
+  "timeline_url": "https://cdn.example.com/inner-citadel/abc123.json"
+}
+Summary
+By using free, open-source components (LLMs, TTS, Whisper, FFmpeg, etc.), we build a no-cost pipeline that can generate high-quality stoic philosophy videos. All steps—from script to final video—use community tools. The Vercel frontend and open APIs tie it together, while object storage+CDN serve the output. This meets the Inner Citadel’s needs with no proprietary locks or costs, and is fully documentable and extensible.
+Sources: OpenAI/Meta/Hugging Face LLM docs, Coqui TTS docs[2], WhisperX repo, Pexels/Pixabay API docs, and best-practice guides for video pipelines[7][5][8][3]. These provide the grounding for our free, scalable architecture.
+
+[1] meta-llama/Llama-2-7b · Hugging Face
+https://huggingface.co/meta-llama/Llama-2-7b
+[2] GitHub - coqui-ai/TTS: - a deep learning toolkit for Text-to-Speech, battle-tested in research and production · GitHub
+https://github.com/coqui-ai/tts
+[3] Scaling AI Without Bill Shock: Modern Cloud vs. Serverless
+https://render.com/articles/scaling-ai-without-bill-shock
+[4] Long-running background functions on Vercel - Inngest Blog
+https://www.inngest.com/blog/vercel-long-running-background-functions
+[5] [6] [7] [8] How to Build a Scalable Video AI Workflow: Architecture, Tools & Best Practices | Life Inside
+https://www.lifeinside.io/insights/how-to-build-a-scalable-video-ai-workflow
+[9] Pexels API
+https://www.pexels.com/api/documentation/
+[10] API - Pixabay
+https://pixabay.com/service/about/api/

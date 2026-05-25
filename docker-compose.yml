@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+
+  # ─── Redis: Job Queue Broker ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: inner_citadel_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # ─── FastAPI: Web Server & SSE ────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: inner_citadel_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=db+sqlite:///results.db
+    volumes:
+      - ./backend/exports:/app/exports
+      - ./backend/assets:/app/assets
+      - ./backend/cache:/app/cache
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ─── Celery Worker: Pipeline Execution ───────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: inner_citadel_worker
+    command: celery -A tasks worker --loglevel=info --concurrency=1
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=db+sqlite:///results.db
+    volumes:
+      - ./backend/exports:/app/exports
+      - ./backend/assets:/app/assets
+      - ./backend/cache:/app/cache
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis_data:

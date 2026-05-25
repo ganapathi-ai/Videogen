@@ -1,0 +1,76 @@
+# ================================================================
+#  Render.com Deployment Config
+#  Deploys FastAPI (lightweight API layer) to Render free tier
+#  The heavy Celery ML worker runs on YOUR LOCAL PC
+# ================================================================
+
+services:
+  # ── FastAPI Web Service (Render Free Tier — 512MB RAM) ──────
+  # This only handles: HTTP requests, SSE streaming, job dispatch
+  # It does NOT run ML — that stays on your local Celery worker
+  - type: web
+    name: inner-citadel-api
+    runtime: python
+    region: oregon          # Closest to most users
+    plan: free              # Free tier — 512MB RAM, 0.1 CPU
+    buildCommand: pip install fastapi uvicorn[standard] celery redis python-dotenv loguru httpx pysubs2 pydantic tenacity
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    rootDir: backend
+
+    envVars:
+      # LLM Keys — set in Render dashboard
+      - key: GROQ_API_KEY
+        sync: false         # You enter this manually in Render dashboard
+
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Stock Video
+      - key: PEXELS_API_KEY
+        sync: false
+
+      - key: PIXABAY_API_KEY
+        sync: false
+
+      # Upstash Redis (Cloud Redis — required since Render has no local Redis)
+      - key: CELERY_BROKER_URL
+        sync: false         # Paste your Upstash Redis URL here
+
+      - key: CELERY_RESULT_BACKEND
+        value: db+sqlite:///results.db
+
+      # Backend URL (your Render service URL)
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: inner-citadel-api
+          property: host
+
+      # Storage
+      - key: STORAGE_TYPE
+        value: local
+
+      - key: EXPORTS_DIR
+        value: ./exports
+
+      # LLM Models
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+
+      - key: OPENROUTER_MODEL
+        value: meta-llama/llama-3.1-8b-instruct:free
+
+      - key: GEMINI_MODEL
+        value: gemini-1.5-flash
+
+      - key: APP_ENV
+        value: production
+
+      - key: DEFAULT_FPS
+        value: "60"
+
+      - key: DEFAULT_ASPECT_RATIO
+        value: "9:16"
