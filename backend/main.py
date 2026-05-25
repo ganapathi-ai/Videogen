@@ -62,7 +62,7 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = "9:16"     # "9:16" | "16:9" | "1:1"
     voice: str = "gb_ryan"         # Voice ID from /api/voices
     fps: int = 30                  # 30fps — smooth on CPU, standard for YouTube
-    channel: str = "stoic"         # "stoic" | "tech" (NeuralBaba Empire channels)
+    channel: str = "stoic"         # Any channel_id defined in channel_config.py
 
 # ─────────────────────────────────────────────
 # Progress Helper
@@ -79,8 +79,15 @@ def set_progress(job_id: str, step: int, status: str, total: int = 9):
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "NeuralBaba Empire API", "version": "3.0.0",
-            "channels": ["stoic", "tech"], "mode": "CPU-only, no Redis/Celery"}
+    from channels.channel_config import get_all_channels
+    channel_names = [ch["id"] for ch in get_all_channels()]
+    return {
+        "status":   "ok",
+        "service":  "VOXLORE STUDIO",
+        "version":  "3.0.0",
+        "channels": channel_names,
+        "mode":     "CPU-only, no Redis/Celery"
+    }
 
 
 @app.get("/api/channels")

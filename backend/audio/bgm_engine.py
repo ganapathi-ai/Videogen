@@ -278,11 +278,11 @@ class BGMEngine:
         if track:
             return track
 
-        # Level 3: Stoic curated as universal fallback
+        # Level 3: Stoic curated tracks used as cross-channel ambient fallback
         if self.channel_id != "stoic":
             track = self._fetch_curated(dominant, STOIC_CURATED)
             if track:
-                logger.info(f"[BGM:{self.channel_id}] Using stoic curated as fallback")
+                logger.info(f"[BGM:{self.channel_id}] Using stoic curated as ambient fallback")
                 return track
 
         # Level 4: Synthetic ambient drone

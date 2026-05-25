@@ -67,7 +67,7 @@ LONG_FORM_CHAPTERS = [
 
 class Beat(BaseModel):
     id: int
-    text: str = Field(description="Exactly 6-12 words. One powerful Stoic idea. No filler.")
+    text: str = Field(description="Exactly 6-12 words. One powerful idea. No filler. No commas.")
     emotion: str = Field(description="One of: minimal|deep|emotional|modern|resolute|inspiring|steady|reassuring")
     intent: str = Field(description="Narrative stage: hook|pain|insight|reframe|action|close")
     visual_keywords: List[str] = Field(description="2-3 cinematic Pexels search terms. E.g. ['roman soldier', 'sunset mountain']")
@@ -84,10 +84,14 @@ class Script(BaseModel):
 # Prompts
 # ─────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an elite cinematic narrator writing spoken-word scripts for THE INNER CITADEL — a Stoic philosophy YouTube channel.
+# NOTE: This is the legacy fallback prompt only.
+# All active channels now use their own system_prompt from channel_config.py.
+# _get_system_prompt(channel_id) fetches the right prompt automatically.
+# This fallback only activates if channel_config import fails entirely.
+LEGACY_SYSTEM_PROMPT = """You are an elite cinematic narrator writing spoken-word video scripts.
 
 CRITICAL RULES — follow every single one:
-1. NEVER mention any philosopher name (no Epictetus, no Seneca, no Marcus Aurelius, no Stoics, no Zeno, no Cleanthes). The narrator IS the voice — no attributions ever.
+1. NEVER use proper nouns or named attributions. The narrator IS the voice.
 2. NEVER use commas. Commas make TTS pause unnaturally. Use short separate sentences instead.
 3. Each beat must be 6-12 words. One powerful self-contained statement.
 4. Write as if you are SPEAKING directly to the viewer. Use "you" and "your". Personal. Urgent.
@@ -100,12 +104,12 @@ CRITICAL RULES — follow every single one:
 
 # ── Channel-aware system prompt ───────────────────────────────────
 def _get_system_prompt(channel_id: str = "stoic") -> str:
-    """Returns the channel-specific system prompt."""
+    """Returns the channel-specific system prompt from channel_config. Never mixes channels."""
     try:
         from channels.channel_config import get_channel
         return get_channel(channel_id)["system_prompt"]
     except Exception:
-        return SYSTEM_PROMPT  # fallback
+        return LEGACY_SYSTEM_PROMPT  # last-resort fallback
 
 
 def _short_form_prompt(topic: str, duration_target: int, num_beats: int,
@@ -116,14 +120,14 @@ def _short_form_prompt(topic: str, duration_target: int, num_beats: int,
         used_section = f"\n\nAVOID THESE EXACT PHRASINGS (already used in past videos):\n"
         used_section += "\n".join(f'  - "{b}"' for b in sample)
 
-    return f"""Generate a {duration_target}-second spoken-word Stoic video script about: "{topic}"
+    return f"""Generate a {duration_target}-second spoken-word video script about: "{topic}"
 
 Target exactly {num_beats} beats. This is a SHORT-FORM video (Shorts/Reels).
-Arc: Hook (1 beat) → Pain (2 beats) → Insight (2 beats) → Action (1 beat) → Close (1 beat)
+Arc: Hook (1 beat) → Context (2 beats) → Insight (2 beats) → Action (1 beat) → Close (1 beat)
 
 Each beat = 6-12 words MAXIMUM. One idea. No names. No commas. Only periods.
 
-GOOD beats:
+GOOD beats (short, direct, spoken-word style):
   "Your mind is not your identity."
   "Every thought you resist will consume you."
   "The pain you feel is not permanent."
@@ -131,9 +135,9 @@ GOOD beats:
   "Begin now. Act. Do not hesitate."
 
 BAD (avoid):
-  "You are not your thoughts, Epictetus" — NO names
-  "Ego fuels your inner turmoil, Seneca" — NO names
+  "You are not your thoughts, [Name]" — NO names
   "Let go, breathe, and find peace" — NO commas
+  Repeating the same idea twice — NO repetition
 {used_section}
 Return ONLY this JSON:
 {{
@@ -165,7 +169,7 @@ def _long_form_prompt(topic: str, duration_target: int, num_beats: int,
         used_section = f"\n\nAVOID THESE PHRASINGS (used in past videos or earlier chapters):\n"
         used_section += "\n".join(f'  - "{b}"' for b in sample)
 
-    return f"""Generate beats for chapter "{chapter_name}" of a >{duration_min}-minute Stoic YouTube video about: "{topic}"
+    return f"""Generate beats for chapter "{chapter_name}" of a >{duration_min}-minute YouTube video about: "{topic}"
 
 This chapter covers: {chapter_intent.upper()} — generate exactly {chapter_beats} beats for this chapter.
 Start beat IDs from {start_id}.
@@ -173,17 +177,17 @@ Start beat IDs from {start_id}.
 Chapter purpose:
   HOOK:        Shock the viewer. Make them feel they MUST watch.
   PROBLEM:     Describe the pain/struggle the viewer lives with. Be specific.
-  PHILOSOPHY:  The core Stoic insight. Slow down. Go deep. Build understanding.
+  PHILOSOPHY:  The core insight. Slow down. Go deep. Build real understanding.
   STORY:       An illustrative scenario (no real names). Make it vivid.
   APPLICATION: Practical. "Here is what you do." Concrete daily actions.
   CLOSE:       Unforgettable ending. Leave them changed.
 
 LONG-FORM style (deeper than Shorts):
   - More nuanced. Allow 2-3 beats to develop one idea.
-  - Use varied rhythms: short punchy beats AND longer (10-12 word) poetic beats.
+  - Use varied rhythms: short punchy beats AND longer (10-12 word) thoughtful beats.
   - Build momentum. Each beat should flow naturally from the previous.
-  - NO commas. NO philosopher names (no Epictetus, Seneca, Aurelius, Zeno). Only periods. Direct address.
-  - Every beat must say "no names" — speak universally, not as attribution.
+  - NO commas. NO proper names. Only periods. Direct address to viewer.
+  - Every beat must speak universally — no attributions, no citations.
 {used_section}
 Return ONLY this JSON:
 {{
@@ -254,8 +258,8 @@ class OpenRouterClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type":  "application/json",
-                "HTTP-Referer":  "https://inner-citadel.app",
-                "X-Title":       "Inner Citadel",
+                "HTTP-Referer":  "https://voxlore.studio",
+                "X-Title":       "Voxlore Studio",
             },
             json={
                 "model":   self.model,
@@ -302,7 +306,9 @@ class GeminiClient:
 
 class ScriptEngine:
     """
-    Generates Stoic video scripts using LLM priority chain.
+    VOXLORE STUDIO — Universal video script generator.
+    Supports ALL channels: stoic, tech, and any future channels.
+    Channel content is driven entirely by channel_config.py system prompts.
     Supports short-form (Shorts/Reels) and long-form (Full YouTube).
     History-aware: passes recent beats to LLM to avoid repetition.
     """
@@ -366,9 +372,9 @@ class ScriptEngine:
     def _generate_short(self, topic: str, duration_s: int,
                           num_beats: int, used_beats: list,
                           system_prompt: str = None) -> dict:
-        """Single LLM call for short-form content."""
+        """Single LLM call for short-form content. System prompt is channel-specific."""
         prompt = _short_form_prompt(topic, duration_s, num_beats, used_beats)
-        sys_p  = system_prompt or SYSTEM_PROMPT
+        sys_p  = system_prompt or LEGACY_SYSTEM_PROMPT
         raw    = self._call_with_fallback(sys_p, prompt, max_tokens=2048)
         return self._parse_and_validate(raw, topic, duration_s)
 
@@ -419,7 +425,7 @@ class ScriptEngine:
             )
 
             raw = self._call_with_fallback(
-                system_prompt or SYSTEM_PROMPT, prompt,
+                system_prompt or LEGACY_SYSTEM_PROMPT, prompt,
                 max_tokens=min(4096, chapter_beats * 120),
             )
             chapter_data = self._parse_and_validate(raw, topic, duration_s)
@@ -516,7 +522,8 @@ class ScriptEngine:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Stoic Topics Library (30 topics — filtered against history)
+# Default Topics per channel (used when user doesn't specify a topic)
+# These are ONLY used as random seeds — history deduplication filters repeats
 # ─────────────────────────────────────────────────────────────────
 
 STOIC_TOPICS = [
@@ -526,23 +533,23 @@ STOIC_TOPICS = [
     "Amor Fati — Love Your Fate",
     "Discipline is Freedom",
     "The Inner Citadel",
-    "Stoic Resilience in Hard Times",
+    "Resilience in Hard Times",
     "Controlling What You Can Control",
     "The Dichotomy of Control",
     "Ego is the Enemy",
     "The View from Above",
     "Negative Visualization",
     "Voluntary Hardship",
-    "The Stoic Daily Practice",
-    "How to Handle Criticism Stoically",
-    "Anger — The Stoic Perspective",
+    "The Daily Practice of Reflection",
+    "How to Handle Criticism",
+    "Anger — Choosing Your Response",
     "Finding Tranquility in Chaos",
-    "Living According to Nature",
+    "Living According to Your Values",
     "The Art of Not Reacting",
     "How to Deal with Failure",
-    "The Power of Stoic Journaling",
+    "The Power of Journaling",
     "Virtue is the Only True Good",
-    "How Stoics Face Death",
+    "Facing Your Own Mortality",
     "Doing Less Better",
     "The Philosophy of Enough",
     "Letting Go of What Others Think",
@@ -552,7 +559,38 @@ STOIC_TOPICS = [
     "Why Comfort is Your Enemy",
 ]
 
+TECH_TOPICS = [
+    "How Large Language Models Actually Work",
+    "How Neural Networks Learn From Data",
+    "How ChatGPT Generates Text Word by Word",
+    "How Netflix Serves 600 Million Users Without Crashing",
+    "How Binary Search Finds Anything in Milliseconds",
+    "How Encryption Keeps Your Data Private",
+    "How Docker Containers Work Under the Hood",
+    "How APIs Connect the Digital World",
+    "How Recommendation Algorithms Predict Your Next Watch",
+    "How Quantum Computers Use Superposition to Compute",
+    "How Git Tracks Every Change You Ever Make",
+    "How TCP/IP Actually Moves Data Across the Internet",
+    "How Databases Index Billions of Rows in Milliseconds",
+    "How Transformers Changed Everything in AI",
+    "How Your Phone Predicts Your Next Word",
+    "How Gradient Descent Teaches Machines to Learn",
+    "How Kubernetes Orchestrates Thousands of Containers",
+    "How HTTPS Keeps Every Web Request Secure",
+    "How Compilers Turn Code Into Machine Instructions",
+    "How Backpropagation Makes Neural Networks Smarter",
+]
 
-def get_random_topic() -> str:
+# Map channel_id → topic list
+CHANNEL_TOPICS = {
+    "stoic": STOIC_TOPICS,
+    "tech":  TECH_TOPICS,
+}
+
+
+def get_random_topic(channel_id: str = "stoic") -> str:
+    """Returns a random topic for the given channel. Fully channel-aware."""
     import random
-    return random.choice(STOIC_TOPICS)
+    topics = CHANNEL_TOPICS.get(channel_id, STOIC_TOPICS)
+    return random.choice(topics)

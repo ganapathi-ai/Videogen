@@ -101,7 +101,7 @@ class TimelineEngine:
         total_duration = segments[-1]["audio_end"] if segments else 0
 
         timeline = {
-            "title": script_data.get("title", "Inner Citadel"),
+            "title": script_data.get("title", script_data.get("topic", "Untitled")),
             "topic": script_data.get("topic", ""),
             "duration": round(total_duration, 4),
             "segments": segments,

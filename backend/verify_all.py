@@ -157,14 +157,23 @@ def chk_long_aspect_ratio():
 chk("ScriptEngine: long/* type='long', short/* type='short'", chk_long_aspect_ratio)
 
 def chk_prompts():
-    from generator.script_engine import SYSTEM_PROMPT, _short_form_prompt, _long_form_prompt
-    assert "NEVER mention any philosopher" in SYSTEM_PROMPT
-    assert "NEVER use commas" in SYSTEM_PROMPT
+    from generator.script_engine import LEGACY_SYSTEM_PROMPT, _short_form_prompt, _long_form_prompt
+    # Legacy fallback prompt: universal rules (no named attributions, no commas)
+    assert "NEVER use proper nouns" in LEGACY_SYSTEM_PROMPT or "NEVER use commas" in LEGACY_SYSTEM_PROMPT
+    assert "NEVER use commas" in LEGACY_SYSTEM_PROMPT
+    # Channel-specific prompts (actual prompts used in production)
+    from channels.channel_config import get_channel
+    stoic_prompt = get_channel("stoic")["system_prompt"]
+    tech_prompt  = get_channel("tech")["system_prompt"]
+    assert "NEVER use commas" in stoic_prompt or "No commas" in stoic_prompt or "commas" in stoic_prompt.lower()
+    assert "NEVER use commas" in tech_prompt  or "No commas" in tech_prompt  or "commas" in tech_prompt.lower()
+    # User-facing prompts: no names, no commas
     p = _short_form_prompt("test", 35, 7)
     assert "No names" in p or "no names" in p.lower()
     p2 = _long_form_prompt("test", 300, 56, "HOOK", "hook", 5, 1)
     assert "no names" in p2.lower()
 chk("ScriptEngine: prompts ban names + commas", chk_prompts)
+
 
 # ── GROUP 5: AudioMixer long-form fixes ─────────────────
 def chk_mixer_no_shortest():

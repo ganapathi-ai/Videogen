@@ -42,13 +42,13 @@ from loguru import logger
 # Tuned specifically for philosophy narration — slow, deep, commanding
 VOICE_PRESETS = {
 
-    # ── 🇬🇧 British (most popular for philosophy YouTube) ─────────
+    # ── British (most popular for wisdom/explainer YouTube) ─────────
     "gb_ryan": {
         "edge":  "en-GB-RyanNeural",
-        "rate":  "-18%",       # Slow, deliberate — Stoic pacing
+        "rate":  "-18%",       # Slow, deliberate — deep authority pacing
         "pitch": "-12Hz",      # Deep and commanding
         "label": "Ryan — Deep British Male",
-        "desc":  "🇬🇧 Deep, commanding. Best for Stoicism.",
+        "desc":  "Deep, commanding. Best for wisdom and philosophy channels.",
         "flag":  "🇬🇧",
     },
     "gb_thomas": {
@@ -64,17 +64,17 @@ VOICE_PRESETS = {
         "rate":  "-14%",
         "pitch": "-5Hz",
         "label": "Sonia — Powerful British Female",
-        "desc":  "🇬🇧 Powerful, elegant. Female philosophy voice.",
+        "desc":  "Powerful, elegant. Strong female narrator voice.",
         "flag":  "🇬🇧",
     },
 
-    # ── 🇺🇸 American ─────────────────────────────────────────────
+    # ── American ─────────────────────────────────────────────────
     "us_christopher": {
         "edge":  "en-US-ChristopherNeural",
         "rate":  "-16%",
         "pitch": "-10Hz",
         "label": "Christopher — Deep American Male",
-        "desc":  "🇺🇸 Deep, authoritative. Documentary narrator.",
+        "desc":  "Deep, authoritative. Tech explainer and documentary narrator.",
         "flag":  "🇺🇸",
     },
     "us_andrew": {
@@ -290,7 +290,7 @@ class TTSEngine:
         raw_path = output_path.replace(".wav", "_raw.wav")
         loop.run_until_complete(self._synthesize_raw(beats, raw_path))
 
-        # Step 2: Apply FFmpeg philosophy voice chain
+        # Step 2: Apply FFmpeg per-channel voice chain (stoic=warm/light, tech=presence/tight)
         self._apply_voice_chain(raw_path, output_path)
 
         try:
@@ -305,7 +305,8 @@ class TTSEngine:
         import edge_tts
 
         segments = []
-        # Pause durations tuned for philosophy — longer pauses feel more profound
+        # Pause durations — tuned for natural spoken-word delivery
+        # Stoic channel benefits from longer pauses (contemplative); tech from shorter (momentum)
         pauses = {
             "hook":    np.zeros(int(self.sample_rate * 1.0), dtype=np.float32),
             "close":   np.zeros(int(self.sample_rate * 1.0), dtype=np.float32),
