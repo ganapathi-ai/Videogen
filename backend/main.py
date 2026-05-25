@@ -237,8 +237,16 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
 
         history = HistoryEngine()
         cfg = LENGTH_CONFIG.get(length, LENGTH_CONFIG["short"])
-        total_steps = 11 if cfg["type"] == "long" else 9  # Long videos have extra steps
+        total_steps = 11 if cfg["type"] == "long" else 9
         JOBS[job_id]["total"] = total_steps
+
+        # ── ASPECT RATIO ENFORCEMENT ─────────────────────────────────
+        # Long-form YouTube MUST be 16:9 (horizontal) regardless of frontend state
+        # Shorts/Reels default to 9:16 (vertical)
+        if cfg["type"] == "long":
+            aspect_ratio = "16:9"
+            logger.info(f"[{job_id[:8]}] Long-form: forcing aspect_ratio=16:9")
+        # For short-form, use whatever the user selected (9:16, 16:9, 1:1)
 
         set_progress(job_id, 1, "📚 Checking history (no repeat content)...", total_steps)
         try:
@@ -340,10 +348,16 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             output_path=mixed_audio,
         )
 
-        # ── Step 9: Final Render ─────────────────────────────
+        # ── Step 9: Final Render ──────────────────────────────────────
         set_progress(job_id, 9, "🚀 Final FFmpeg render + quality validation...", total_steps)
         final_video = str(job_dir / "final_video.mp4")
-        _ffmpeg_render(raw_video, mixed_audio, captions_path, final_video, fps)
+
+        # Use video duration from timeline for precise render length
+        video_duration = timeline.get("duration", 0.0)
+        _ffmpeg_render(
+            raw_video, mixed_audio, captions_path, final_video,
+            fps=fps, duration=video_duration
+        )
 
         # Thumbnail
         thumb = str(job_dir / "thumbnail.jpg")
@@ -384,44 +398,82 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         raise
 
 
-def _ffmpeg_render(video: str, audio: str, captions: str, out: str, fps: int):
+
+def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
+                   fps: int = 30, duration: float = 0.0):
+    """
+    Final FFmpeg render: mux video + mixed audio + burned-in captions.
+
+    KEY FIXES for long-form videos:
+      - NO -shortest flag: was cutting audio if video/audio lengths differed by ms
+      - Uses -t duration: precise output length from timeline (not guessed)
+      - Scaled timeout: 300s for shorts, 1800s for 11-min videos
+      - Thumbnail extracted at 20% through video (better than fixed 5s for long)
+    """
     import subprocess
 
-    # Fix Windows path for FFmpeg ass= filter:
-    # Backslashes → forward slashes, colon after drive letter escaped as \:
     def _escape_ass_path(p: str) -> str:
         p = p.replace("\\", "/")
-        # Escape the drive colon: C:/path → C\:/path
         if len(p) >= 2 and p[1] == ":":
             p = p[0] + "\\:" + p[2:]
         return p
 
     ass_path = _escape_ass_path(captions)
 
+    # Scale timeout: short videos need ~60s, 11-min needs ~1800s
+    timeout_s = max(300, int(duration * 2.5) + 120) if duration > 0 else 600
+
+    # Duration flag: use timeline duration if known, otherwise let FFmpeg decide
+    dur_flags = ["-t", f"{duration:.3f}"] if duration > 0 else []
+
     # Try with burned-in captions first
     r = subprocess.run([
-        "ffmpeg", "-i", video, "-i", audio,
+        "ffmpeg",
+        "-i", video,
+        "-i", audio,
         "-vf", f"ass='{ass_path}'",
         "-c:v", "libx264", "-preset", "fast",
         "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart", "-shortest",
+        "-movflags", "+faststart",
+        # NO -shortest: prevents audio/video from being cut prematurely
+        *dur_flags,
         out, "-y"
-    ], capture_output=True, text=True)
+    ], capture_output=True, text=True, timeout=timeout_s)
 
     if r.returncode != 0:
         logger.warning(f"Caption burn-in failed: {r.stderr[-200:]} — falling back")
-        # Fallback without captions
+        # Fallback without captions (still no -shortest)
         subprocess.run([
-            "ffmpeg", "-i", video, "-i", audio,
+            "ffmpeg",
+            "-i", video,
+            "-i", audio,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart", "-shortest",
+            "-movflags", "+faststart",
+            *dur_flags,
             out, "-y"
-        ], check=True, capture_output=True)
+        ], check=True, capture_output=True, timeout=timeout_s)
 
 
 def _extract_thumb(video: str, out: str):
+    """Extracts thumbnail at 20% through video (better than fixed 5s for long videos)."""
     import subprocess
-    subprocess.run(["ffmpeg", "-i", video, "-ss", "5", "-vframes", "1",
-                    "-q:v", "2", out, "-y"], capture_output=True, check=False)
+
+    # First get video duration to extract at 20% mark
+    try:
+        probe = subprocess.run([
+            "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video
+        ], capture_output=True, text=True, timeout=10)
+        import json
+        dur = float(json.loads(probe.stdout).get("format", {}).get("duration", 30.0))
+        thumb_t = max(3.0, dur * 0.20)  # 20% mark, minimum 3s
+    except Exception:
+        thumb_t = 5.0
+
+    subprocess.run([
+        "ffmpeg", "-i", video,
+        "-ss", f"{thumb_t:.1f}", "-vframes", "1",
+        "-q:v", "2", out, "-y"
+    ], capture_output=True, check=False, timeout=30)
+

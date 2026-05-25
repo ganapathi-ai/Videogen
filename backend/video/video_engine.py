@@ -63,13 +63,20 @@ class VideoEngine:
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
+        # Scale per-clip timeout with number of clips (long-form has 122 clips)
+        # Each clip takes ~5-30s depending on duration and zoompan complexity
+        per_clip_timeout = max(120, min(300, 60 + len(clips) * 2))
+        logger.info(
+            f"[VideoEngine] {len(clips)} clips | per-clip timeout={per_clip_timeout}s"
+        )
+
         processed = []
         tmp_dir = Path(tempfile.mkdtemp())
 
         for i, clip_info in enumerate(clips):
-            src = clip_info.get("path", "")
+            src      = clip_info.get("path", "")
             duration = clip_info.get("duration", 4.0)
-            emotion = clip_info.get("segment", {}).get("emotion", "deep")
+            emotion  = clip_info.get("segment", {}).get("emotion", "deep")
             zoom_ratio = self._emotion_to_zoom(emotion)
 
             logger.info(f"[VideoEngine] Clip {i+1}/{len(clips)}: {duration:.2f}s zoom={zoom_ratio}")
@@ -77,12 +84,12 @@ class VideoEngine:
             out_clip = str(tmp_dir / f"clip_{i:03d}.mp4")
 
             if src and Path(src).exists():
-                ok = self._process_clip_ffmpeg(src, out_clip, duration, zoom_ratio)
+                ok = self._process_clip_ffmpeg(src, out_clip, duration, zoom_ratio,
+                                               timeout=per_clip_timeout)
             else:
                 ok = False
 
             if not ok:
-                # Fallback: generate solid dark clip
                 ok = self._generate_color_clip(out_clip, duration)
 
             if ok and Path(out_clip).exists():
@@ -93,16 +100,14 @@ class VideoEngine:
         if not processed:
             raise RuntimeError("[VideoEngine] All clips failed to process")
 
-        # Concatenate all processed clips
-        logger.info(f"[VideoEngine] Concatenating {len(processed)} clips → {output_path}")
-        self._concat_clips(processed, output_path)
+        # Scale concat timeout: 120s base + 2s per clip
+        concat_timeout = max(180, 60 + len(processed) * 5)
+        logger.info(f"[VideoEngine] Concatenating {len(processed)} clips (timeout={concat_timeout}s)")
+        self._concat_clips(processed, output_path, timeout=concat_timeout)
 
-        # Cleanup temp files
         for p in processed:
-            try:
-                os.unlink(p)
-            except Exception:
-                pass
+            try: os.unlink(p)
+            except Exception: pass
 
         logger.info(f"[VideoEngine] Done: {output_path}")
         return output_path
@@ -112,17 +117,16 @@ class VideoEngine:
     # ─────────────────────────────────────────────
 
     def _process_clip_ffmpeg(self, src: str, out: str, duration: float,
-                              zoom_ratio: float) -> bool:
+                              zoom_ratio: float, timeout: int = 120) -> bool:
         """
         Processes a single video clip with FFmpeg:
           1. Crop to target aspect ratio (center crop)
           2. Scale to target resolution
           3. Trim to needed duration (loop if too short)
           4. Apply zoompan Ken Burns effect
-          5. Encode as H.264 fast preset
+          5. Encode as H.264 ultrafast
         """
         try:
-            # Get source dimensions
             probe = subprocess.run([
                 "ffprobe", "-v", "quiet", "-print_format", "json",
                 "-show_streams", "-select_streams", "v:0", src
@@ -132,19 +136,15 @@ class VideoEngine:
             if not src_w:
                 return False
 
-            # Loop count if source too short
-            loops = max(1, math.ceil(duration / max(src_dur, 0.1)))
-            n_frames = int(duration * self.fps)
+            loops      = max(1, math.ceil(duration / max(src_dur, 0.1)))
+            n_frames   = max(1, int(duration * self.fps))
 
-            # Ken Burns: zoom from 1.0 → (1.0 + zoom_ratio) over clip duration
-            # FFmpeg zoompan z expression: starts at 1.0, increments per frame
-            zoom_per_frame = zoom_ratio / max(n_frames, 1)
-            max_zoom = 1.0 + zoom_ratio
+            # Ken Burns: smooth zoom from 1.0 to (1.0 + zoom_ratio)
+            zoom_per_frame = zoom_ratio / n_frames
+            max_zoom       = 1.0 + zoom_ratio
 
-            # Build crop filter to match target aspect ratio
             crop_filter = self._build_crop_filter(src_w, src_h)
 
-            # zoompan filter — native C, runs in real-time on CPU
             zoom_filter = (
                 f"zoompan="
                 f"z='min(zoom+{zoom_per_frame:.6f},{max_zoom:.4f})':"
@@ -155,36 +155,33 @@ class VideoEngine:
                 f"fps={self.fps}"
             )
 
-            # Full filter chain
             vf = f"{crop_filter},{zoom_filter}" if crop_filter else zoom_filter
 
-            # Build FFmpeg command
-            # -stream_loop loops the source if it's shorter than needed
             cmd = [
                 "ffmpeg",
                 "-stream_loop", str(loops),
                 "-i", src,
                 "-t", f"{duration:.3f}",
                 "-vf", vf,
-                "-an",                      # No audio in raw video
+                "-an",
                 "-c:v", "libx264",
-                "-preset", "ultrafast",     # Fastest encoding (CPU)
+                "-preset", "ultrafast",
                 "-crf", "23",
                 "-pix_fmt", "yuv420p",
                 "-r", str(self.fps),
                 out, "-y",
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
-                logger.warning(f"[VideoEngine] FFmpeg error clip: {result.stderr[-300:]}")
+                logger.warning(f"[VideoEngine] FFmpeg clip error: {result.stderr[-200:]}")
                 return False
 
             return Path(out).exists() and Path(out).stat().st_size > 1000
 
         except subprocess.TimeoutExpired:
-            logger.warning(f"[VideoEngine] Clip {src} timed out")
+            logger.warning(f"[VideoEngine] Clip timed out ({timeout}s): {src}")
             return False
         except Exception as e:
             logger.warning(f"[VideoEngine] Clip error: {e}")
@@ -210,31 +207,27 @@ class VideoEngine:
             crop_y = (src_h - crop_h) // 2
             return f"crop={src_w}:{crop_h}:0:{crop_y},scale={self.w}:{self.h}"
 
-    def _concat_clips(self, clip_paths: list, output_path: str):
-        """Concatenates clips using FFmpeg concat demuxer (fastest method)."""
-        # Write concat list file
+    def _concat_clips(self, clip_paths: list, output_path: str, timeout: int = 180):
+        """Concatenates clips using FFmpeg concat demuxer. Timeout scales with clip count."""
         list_file = output_path + ".concat.txt"
         with open(list_file, "w", encoding="utf-8") as f:
             for p in clip_paths:
-                # Escape backslashes for FFmpeg on Windows
                 safe = p.replace("\\", "/")
                 f.write(f"file '{safe}'\n")
 
         try:
             cmd = [
                 "ffmpeg",
-                "-f", "concat",
-                "-safe", "0",
+                "-f", "concat", "-safe", "0",
                 "-i", list_file,
-                "-c", "copy",           # Stream copy — no re-encode needed
+                "-c", "copy",
                 "-an",
                 output_path, "-y",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
-                logger.warning(f"[VideoEngine] Concat copy failed, trying re-encode: {result.stderr[-200:]}")
-                # Fallback: re-encode
+                logger.warning(f"[VideoEngine] Concat copy failed, re-encoding: {result.stderr[-150:]}")
                 cmd2 = [
                     "ffmpeg",
                     "-f", "concat", "-safe", "0",
@@ -243,12 +236,10 @@ class VideoEngine:
                     "-pix_fmt", "yuv420p", "-an",
                     output_path, "-y",
                 ]
-                subprocess.run(cmd2, capture_output=True, timeout=180, check=True)
+                subprocess.run(cmd2, capture_output=True, timeout=timeout * 3, check=True)
         finally:
-            try:
-                os.unlink(list_file)
-            except Exception:
-                pass
+            try: os.unlink(list_file)
+            except Exception: pass
 
     def _generate_color_clip(self, out: str, duration: float) -> bool:
         """Generates a solid dark background clip as fallback."""

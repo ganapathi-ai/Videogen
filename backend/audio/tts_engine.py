@@ -277,7 +277,30 @@ class TTSEngine:
                 logger.info(f"[TTS] Beat {i+1}: {len(audio)/self.sample_rate:.2f}s")
 
             except Exception as e:
-                logger.warning(f"[TTS] Beat {i+1} failed: {e}")
+                logger.warning(f"[TTS] Beat {i+1} attempt 1 failed: {e} — retrying")
+                # Retry once before giving up
+                try:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(1.0)  # Brief wait before retry
+                    comm2 = edge_tts.Communicate(
+                        text=text, voice=self.edge_voice,
+                        rate=self.rate, pitch=self.pitch, volume="+0%",
+                    )
+                    await comm2.save(tmp_mp3)
+                    subprocess.run([
+                        "ffmpeg", "-i", tmp_mp3,
+                        "-ar", str(self.sample_rate), "-ac", "1",
+                        tmp_wav, "-y",
+                    ], capture_output=True, check=True)
+                    audio, _ = sf.read(tmp_wav, dtype="float32")
+                    if audio.ndim > 1: audio = audio.mean(axis=1)
+                    segments.append(audio)
+                    segments.append(pauses.get(intent, pauses["default"]))
+                    logger.info(f"[TTS] Beat {i+1}: retry OK")
+                except Exception as e2:
+                    logger.error(f"[TTS] Beat {i+1} SKIPPED after retry: {e2}")
+                    # Add silence placeholder so timing stays aligned
+                    segments.append(pauses.get("default", pauses["default"]) * 6)
             finally:
                 for p in [tmp_mp3, tmp_wav]:
                     try: os.unlink(p)
@@ -287,8 +310,9 @@ class TTSEngine:
             raise RuntimeError("[TTS] No audio produced")
 
         full = np.concatenate(segments).astype(np.float32)
+        raw_dur = len(full) / self.sample_rate
         sf.write(output_path, full, self.sample_rate, format="WAV")
-        logger.info(f"[TTS] Raw audio: {len(full)/self.sample_rate:.2f}s → {output_path}")
+        logger.info(f"[TTS] Raw audio: {raw_dur:.2f}s ({len(beats)} beats) -> {output_path}")
         return output_path
 
     def _apply_voice_chain(self, input_path: str, output_path: str):
@@ -322,15 +346,30 @@ class TTSEngine:
             "loudnorm=I=-14:TP=-1.5:LRA=7"
         )
 
+        # Scale timeout with audio duration for long-form videos
+        # loudnorm runs 2 passes: long audio = more processing time
+        import soundfile as sf_probe
+        try:
+            info = sf_probe.info(input_path)
+            audio_dur = info.duration
+        except Exception:
+            audio_dur = 60.0  # Conservative default
+        timeout_s = max(120, int(audio_dur * 1.5) + 60)
+
         cmd = [
             "ffmpeg", "-i", input_path,
             "-af", af_chain,
-            "-ar", "44100",   # Upsample to 44.1kHz for final quality
+            "-ar", "44100",
             "-ac", "1",
             output_path, "-y",
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[TTS] Voice chain timed out ({timeout_s}s) — using simple chain")
+            result = type('obj', (object,), {'returncode': 1, 'stderr': 'timeout'})()
+
         if result.returncode != 0:
             logger.warning(f"[TTS] Voice chain failed: {result.stderr[-300:]}")
             # Fallback: just copy with volume boost
@@ -339,9 +378,9 @@ class TTSEngine:
                 "-af", "volume=2.5,loudnorm=I=-14:TP=-1.5",
                 "-ar", "44100", "-ac", "1",
                 output_path, "-y",
-            ], capture_output=True, check=False)
+            ], capture_output=True, check=False, timeout=timeout_s)
 
-        logger.info(f"[TTS] Voice chain applied → {output_path}")
+        logger.info(f"[TTS] Voice chain applied ({audio_dur:.1f}s) -> {output_path}")
 
     def _clean_text(self, text: str) -> str:
         """

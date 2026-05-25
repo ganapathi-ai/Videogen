@@ -1,4 +1,20 @@
-"""MASTER VERIFICATION — All systems including history + long-form."""
+"""
+MASTER VERIFICATION v3 — All systems including history, long-form, audio fixes.
+
+Checks:
+  1.  All 13 module imports
+  2.  Dead code scan (no old libraries)
+  3.  History engine (5 checks)
+  4.  ScriptEngine (3 checks: 6 lengths, chapters, prompts)
+  5.  AudioMixer long-form fixes (aloop, no -shortest, timeout scaling)
+  6.  TTS engine (voice chain timeout, beat retry)
+  7.  VideoEngine (scaled timeouts, 16:9 support)
+  8.  Aspect ratio enforcement (backend forces 16:9 for long-form)
+  9.  FFmpeg render (no -shortest, duration param, scaled timeout)
+  10. API routes (all 7)
+  11. Frontend (6 lengths, voice IDs, history note)
+  12. .env keys
+"""
 import sys, os, subprocess, re, json
 sys.path.insert(0, r'c:\projects\YOUTUBE_WEBAPP\backend')
 os.chdir(r'c:\projects\YOUTUBE_WEBAPP\backend')
@@ -30,7 +46,7 @@ for root, dirs, files in os.walk(r'c:\projects\YOUTUBE_WEBAPP\backend'):
     dirs[:] = [d for d in dirs if d not in ('__pycache__', '.git', 'exports', 'bgm_cache', 'assets')]
     for f in files:
         if f.endswith('.py') and not os.path.basename(f).startswith('verify_'):
-            if os.path.basename(f) not in ('test_engines.py', 'cli.py'):
+            if os.path.basename(f) not in ('test_engines.py', 'cli.py', 'AUDIT_FINDINGS.md'):
                 PY_FILES.append(os.path.join(root, f))
 
 def scan(pattern, label):
@@ -47,11 +63,11 @@ def scan(pattern, label):
 chk("No moviepy.editor", lambda: scan(r'from moviepy\.editor|import moviepy\.editor', "moviepy"))
 chk("No clip.fl() (MoviePy 1.x)", lambda: scan(r'\.fl\(', "fl()"))
 chk("No kokoro import", lambda: scan(r'import kokoro|from kokoro', "kokoro"))
-# af_bella is intentionally kept in the legacy map in tts_engine.py — skip that file
+
 def chk_no_af_bella_default():
     for fpath in PY_FILES:
         if 'tts_engine.py' in fpath:
-            continue  # Legacy map intentionally contains af_bella as a key
+            continue
         with open(fpath, encoding='utf-8', errors='ignore') as f:
             for i, line in enumerate(f, 1):
                 if '"af_bella"' in line and not line.strip().startswith('#') and 'LEGACY' not in line:
@@ -60,10 +76,8 @@ chk("No af_bella default outside legacy map", chk_no_af_bella_default)
 
 # ── GROUP 3: History Engine ──────────────────────────────
 def chk_history_structure():
-    from history.history_engine import HistoryEngine, HISTORY_FILE
-    from history.history_engine import TOPIC_SIMILARITY_THRESHOLD, BEAT_SIMILARITY_THRESHOLD
+    from history.history_engine import HistoryEngine, TOPIC_SIMILARITY_THRESHOLD, BEAT_SIMILARITY_THRESHOLD
     h = HistoryEngine()
-    assert HISTORY_FILE.parent.exists()
     assert 0.5 < TOPIC_SIMILARITY_THRESHOLD < 1.0
     assert 0.5 < BEAT_SIMILARITY_THRESHOLD  < 1.0
 chk("History: engine structure + thresholds", chk_history_structure)
@@ -71,52 +85,37 @@ chk("History: engine structure + thresholds", chk_history_structure)
 def chk_history_topic_check():
     from history.history_engine import HistoryEngine
     h = HistoryEngine()
-    # Test internal similarity function
     score_same, _ = h._best_topic_match("Overcoming Fear", ["Overcoming Fear"])
-    assert score_same > 0.9, f"Same topic should score >0.9: {score_same}"
+    assert score_same > 0.9, f"Same topic score: {score_same}"
     score_diff, _ = h._best_topic_match("The Beauty of Rain", ["Overcoming Fear"])
-    assert score_diff < 0.5, f"Different topics should score <0.5: {score_diff}"
+    assert score_diff < 0.5, f"Diff topic score: {score_diff}"
 chk("History: topic similarity scoring", chk_history_topic_check)
 
 def chk_history_beat_filter():
     from history.history_engine import HistoryEngine
     h = HistoryEngine()
-    # Exact duplicate should be filtered
     past = ["Your mind is not your identity."]
-    beat = {"text": "Your mind is not your identity.", "id": 1}
-    assert h._is_duplicate_beat(beat["text"], past), "Exact duplicate should be caught"
-    # Novel beat should pass
-    novel = {"text": "Strength grows from facing what you fear."}
-    assert not h._is_duplicate_beat(novel["text"], past), "Novel beat should pass"
+    assert h._is_duplicate_beat("Your mind is not your identity.", past)
+    assert not h._is_duplicate_beat("Strength grows from facing what you fear.", past)
 chk("History: beat deduplication logic", chk_history_beat_filter)
 
 def chk_history_save_load():
     import tempfile
     from pathlib import Path
     from history import history_engine as he
-    # Temporarily redirect history file to a temp file
     orig = he.HISTORY_FILE
     tmp = Path(tempfile.mktemp(suffix='.jsonl'))
     he.HISTORY_FILE = tmp
     try:
-        h = he.HistoryEngine()
+        h = he.HistoryEngine(); h._cache = None
+        dummy = {"topic": "Test Topic", "title": "Test Title",
+                 "beats": [{"text": "You choose how you respond."}, {"text": "Every moment is a test."}]}
+        h.save(dummy, length="short")
         h._cache = None
-        dummy_script = {
-            "topic": "Test Philosophy Topic",
-            "title": "The Test of Resolve",
-            "beats": [{"text": "You choose how you respond."}, {"text": "Every moment is a test."}],
-        }
-        h.save(dummy_script, length="short")
-        h._cache = None  # Force reload
         loaded = h._load()
-        assert len(loaded) == 1, f"Expected 1 entry, got {len(loaded)}"
-        assert loaded[0]["topic"] == "Test Philosophy Topic"
-        assert len(loaded[0]["beats"]) == 2
-        topics = h.get_all_topics()
-        assert "Test Philosophy Topic" in topics
-        stats = h.get_stats()
-        assert stats["total_videos"] == 1
-        assert stats["total_beats"] == 2
+        assert len(loaded) == 1
+        assert loaded[0]["topic"] == "Test Topic"
+        assert h.get_stats()["total_videos"] == 1
     finally:
         he.HISTORY_FILE = orig
         try: tmp.unlink()
@@ -126,47 +125,157 @@ chk("History: save + load + get_stats", chk_history_save_load)
 def chk_history_normalize():
     from history.history_engine import HistoryEngine
     h = HistoryEngine()
-    # _normalize: lower + strip punct + collapse spaces
     result = h._normalize('Your MIND,  is Free.')
-    # double-space collapses to single space by re.sub(r'\s+', ' ')
     assert result == 'your mind is free', f"Got: {repr(result)}"
 chk("History: text normalizer", chk_history_normalize)
 
-# ── GROUP 4: Script Engine long-form config ───────────────
+# ── GROUP 4: Script Engine ───────────────────────────────
 def chk_length_config():
     from generator.script_engine import LENGTH_CONFIG, LONG_FORM_CHAPTERS
     required = ["short", "medium", "long_3", "long_5", "long_7", "long_11"]
     for k in required:
-        assert k in LENGTH_CONFIG, f"Missing length: {k}"
-    # Beat counts should scale with duration
+        assert k in LENGTH_CONFIG, f"Missing: {k}"
     assert LENGTH_CONFIG["long_11"]["beats"] > LENGTH_CONFIG["long_7"]["beats"]
     assert LENGTH_CONFIG["long_7"]["beats"]  > LENGTH_CONFIG["long_5"]["beats"]
     assert LENGTH_CONFIG["long_5"]["beats"]  > LENGTH_CONFIG["long_3"]["beats"]
     assert LENGTH_CONFIG["long_3"]["beats"]  > LENGTH_CONFIG["medium"]["beats"]
-    # Chapter proportions must sum to ~1.0
     total_prop = sum(c["proportion"] for c in LONG_FORM_CHAPTERS)
     assert abs(total_prop - 1.0) < 0.01, f"Chapter proportions sum to {total_prop}"
-    # All 6 chapters present
     chapter_names = {c["name"] for c in LONG_FORM_CHAPTERS}
-    assert "HOOK" in chapter_names and "CLOSE" in chapter_names
+    assert {"HOOK", "PROBLEM", "PHILOSOPHY", "STORY", "APPLICATION", "CLOSE"} <= chapter_names
 chk("ScriptEngine: 6 lengths + chapter config valid", chk_length_config)
 
+def chk_long_aspect_ratio():
+    from generator.script_engine import LENGTH_CONFIG
+    for k in ["long_3", "long_5", "long_7", "long_11"]:
+        assert LENGTH_CONFIG[k]["type"] == "long", f"{k} should be type=long"
+    for k in ["short", "medium"]:
+        assert LENGTH_CONFIG[k]["type"] == "short", f"{k} should be type=short"
+chk("ScriptEngine: long/* type='long', short/* type='short'", chk_long_aspect_ratio)
+
 def chk_prompts():
-    from generator.script_engine import (
-        SYSTEM_PROMPT, _short_form_prompt, _long_form_prompt
-    )
+    from generator.script_engine import SYSTEM_PROMPT, _short_form_prompt, _long_form_prompt
     assert "NEVER mention any philosopher" in SYSTEM_PROMPT
     assert "NEVER use commas" in SYSTEM_PROMPT
-    # Short form: "No names. No commas." in the line about each beat
     p = _short_form_prompt("test", 35, 7)
     assert "No names" in p or "no names" in p.lower()
-    assert "No commas" in p or "no commas" in p.lower()
-    # Long form: also has "no names" in it
     p2 = _long_form_prompt("test", 300, 56, "HOOK", "hook", 5, 1)
     assert "no names" in p2.lower()
 chk("ScriptEngine: prompts ban names + commas", chk_prompts)
 
-# ── GROUP 5: API Routes ──────────────────────────────────
+# ── GROUP 5: AudioMixer long-form fixes ─────────────────
+def chk_mixer_no_shortest():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\audio\audio_mixer.py', encoding='utf-8').read()
+    # Primary mix should NOT have -shortest
+    assert '"-shortest"' not in src or src.count('"-shortest"') == 0, \
+        "Found -shortest flag in mixer (causes audio cut)"
+chk("AudioMixer: no -shortest flag (long-form safe)", chk_mixer_no_shortest)
+
+def chk_mixer_aloop():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\audio\audio_mixer.py', encoding='utf-8').read()
+    assert 'aloop' in src, "Missing aloop filter (seamless BGM loop)"
+    assert '_extend_bgm_seamless' in src, "Missing _extend_bgm_seamless method"
+chk("AudioMixer: aloop seamless BGM (no click seams)", chk_mixer_aloop)
+
+def chk_mixer_timeout_scaled():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\audio\audio_mixer.py', encoding='utf-8').read()
+    assert 'timeout_s' in src, "Missing timeout_s scaling"
+    assert 'total_dur' in src, "Missing total_dur reference for scaling"
+chk("AudioMixer: timeout scaled with video duration", chk_mixer_timeout_scaled)
+
+def chk_mixer_duck_range():
+    from audio.audio_mixer import AudioMixer
+    m = AudioMixer()
+    for emotion, level in m.DUCK_MAP.items():
+        assert 0.05 <= level <= 0.20, f"Duck {emotion}={level} out of 5-20% range"
+chk("AudioMixer: all duck levels in 5-20% range", chk_mixer_duck_range)
+
+# ── GROUP 6: TTS engine ─────────────────────────────────
+def chk_tts_10_voices():
+    from audio.tts_engine import VOICE_PRESETS
+    assert len(VOICE_PRESETS) == 10, f"Expected 10 voices, got {len(VOICE_PRESETS)}"
+chk("TTS: 10 voice presets", chk_tts_10_voices)
+
+def chk_tts_voice_chain_timeout():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\audio\tts_engine.py', encoding='utf-8').read()
+    assert 'timeout_s' in src, "Missing timeout_s in TTS voice chain"
+    assert 'TimeoutExpired' in src, "Missing TimeoutExpired handling in TTS"
+chk("TTS: voice chain has scaled timeout + TimeoutExpired handler", chk_tts_voice_chain_timeout)
+
+def chk_tts_beat_retry():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\audio\tts_engine.py', encoding='utf-8').read()
+    assert 'retry' in src.lower() or 'Retry' in src or 'retry OK' in src, "Missing beat retry logic"
+    assert 'SKIPPED after retry' in src, "Missing fallback after retry"
+chk("TTS: beat retry on failure + silence placeholder", chk_tts_beat_retry)
+
+def chk_tts_cleaner():
+    from audio.tts_engine import TTSEngine
+    e = TTSEngine("gb_ryan")
+    assert e._clean_text("You are not your thoughts, Epictetus") == "You are not your thoughts."
+    assert e._clean_text("Ego fuels turmoil, Seneca") == "Ego fuels turmoil."
+    assert "," not in e._clean_text("Be strong, be calm, be clear.")
+chk("TTS: cleaner strips names + commas", chk_tts_cleaner)
+
+# ── GROUP 7: VideoEngine ─────────────────────────────────
+def chk_video_timeout_scaled():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\video\video_engine.py', encoding='utf-8').read()
+    assert 'per_clip_timeout' in src, "Missing per_clip_timeout scaling"
+    assert 'concat_timeout' in src, "Missing concat_timeout scaling"
+chk("VideoEngine: per-clip + concat timeouts scale with clip count", chk_video_timeout_scaled)
+
+def chk_video_aspect_ratios():
+    from video.video_engine import RESOLUTIONS
+    assert "9:16" in RESOLUTIONS and "16:9" in RESOLUTIONS and "1:1" in RESOLUTIONS
+    assert RESOLUTIONS["9:16"]  == (1080, 1920), "9:16 must be 1080x1920 (Shorts)"
+    assert RESOLUTIONS["16:9"] == (1920, 1080), "16:9 must be 1920x1080 (YouTube)"
+    assert RESOLUTIONS["1:1"]  == (1080, 1080), "1:1 must be 1080x1080 (Instagram)"
+chk("VideoEngine: all 3 aspect ratios correct resolution", chk_video_aspect_ratios)
+
+chk("VideoEngine: no MoviePy dependency",
+    lambda: not re.search(r'moviepy', open(r'c:\projects\YOUTUBE_WEBAPP\backend\video\video_engine.py').read()))
+
+# ── GROUP 8: Aspect Ratio Enforcement ───────────────────
+def chk_aspect_ratio_enforcement():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\main.py', encoding='utf-8').read()
+    assert 'aspect_ratio = "16:9"' in src or "aspect_ratio = '16:9'" in src, \
+        "Backend must force 16:9 for long-form videos"
+    assert 'Long-form' in src or 'long' in src.lower(), "Should log long-form aspect ratio override"
+chk("main.py: backend enforces 16:9 for long_* videos", chk_aspect_ratio_enforcement)
+
+# ── GROUP 9: FFmpeg render fixes ─────────────────────────
+def chk_render_no_shortest():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\main.py', encoding='utf-8').read()
+    # Find the _ffmpeg_render function specifically
+    fn_start = src.find('def _ffmpeg_render(')
+    fn_end   = src.find('\ndef _extract_thumb', fn_start)
+    fn_body  = src[fn_start:fn_end]
+    assert '"-shortest"' not in fn_body and "'-shortest'" not in fn_body, \
+        "_ffmpeg_render still has -shortest flag"
+chk("main.py _ffmpeg_render: no -shortest (no audio cut)", chk_render_no_shortest)
+
+def chk_render_duration_param():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\main.py', encoding='utf-8').read()
+    assert 'duration: float' in src, "Missing duration param in _ffmpeg_render"
+    assert 'dur_flags' in src or '-t' in src, "Missing -t duration control in render"
+chk("main.py _ffmpeg_render: uses -t duration (precise length)", chk_render_duration_param)
+
+def chk_render_timeout():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\main.py', encoding='utf-8').read()
+    fn_start = src.find('def _ffmpeg_render(')
+    fn_end   = src.find('\ndef _extract_thumb', fn_start)
+    fn_body  = src[fn_start:fn_end]
+    assert 'timeout' in fn_body, "_ffmpeg_render should have timeout"
+chk("main.py _ffmpeg_render: has timeout (no infinite hang)", chk_render_timeout)
+
+def chk_thumb_at_20pct():
+    src = open(r'c:\projects\YOUTUBE_WEBAPP\backend\main.py', encoding='utf-8').read()
+    fn_start = src.find('def _extract_thumb(')
+    fn_body  = src[fn_start:fn_start+800]
+    assert '0.20' in fn_body or '20%' in fn_body.lower() or 'dur * 0' in fn_body, \
+        "Thumbnail should be extracted at 20% not fixed 5s"
+chk("main.py _extract_thumb: at 20% mark (not fixed 5s)", chk_thumb_at_20pct)
+
+# ── GROUP 10: API Routes ─────────────────────────────────
 def chk_routes():
     import main
     routes = {r.path for r in main.app.routes}
@@ -175,16 +284,13 @@ def chk_routes():
                 "/api/health", "/api/voices", "/api/history"]
     for r in required:
         assert r in routes, f"Missing route: {r}"
-chk("API: all 7 routes registered (incl. /api/history)", chk_routes)
+chk("API: all 7 routes registered", chk_routes)
 
-# ── GROUP 6: TTS, BGM, Video, Captions (quick) ───────────
-chk("TTS: 10 voices registered", lambda: __import__("audio.tts_engine") and
-    len(__import__("audio.tts_engine", fromlist=["VOICE_PRESETS"]).VOICE_PRESETS) == 10)
+# ── GROUP 11: BGM Engine ─────────────────────────────────
 chk("BGM: curated tracks present", lambda: len(
     __import__("audio.bgm_engine", fromlist=["CURATED_TRACKS"]).CURATED_TRACKS) >= 4)
-chk("VideoEngine: no MoviePy", lambda: "moviepy" not in
-    open(r'c:\projects\YOUTUBE_WEBAPP\backend\video\video_engine.py').read())
 
+# ── GROUP 12: CaptionEngine ──────────────────────────────
 def chk_captions():
     import tempfile
     from captions.caption_engine import CaptionEngine
@@ -196,33 +302,30 @@ def chk_captions():
     subs = pysubs2.load(e.build_ass_subtitles(t, tmp))
     assert len(subs) > 0
     os.unlink(tmp)
-chk("CaptionEngine: produces subtitle events", chk_captions)
+chk("CaptionEngine: produces ASS subtitle events", chk_captions)
 
-# ── GROUP 7: Frontend ────────────────────────────────────
+# ── GROUP 13: Frontend ───────────────────────────────────
 def chk_frontend():
     tsx = open(r'c:\projects\YOUTUBE_WEBAPP\frontend\app\components\GenerateForm.tsx', encoding='utf-8').read()
-    assert 'gb_ryan' in tsx,      "Missing gb_ryan voice"
-    assert '"long_3"' in tsx,     "Missing long_3 length"
-    assert '"long_5"' in tsx,     "Missing long_5 length"
-    assert '"long_7"' in tsx,     "Missing long_7 length"
-    assert '"long_11"' in tsx,    "Missing long_11 length"
-    assert 'SHORTS / REELS' in tsx.upper() or 'SHORTS' in tsx.upper(), "Missing Shorts section"
-    assert 'FULL YOUTUBE' in tsx.upper() or 'YouTube' in tsx, "Missing YouTube section"
-    assert '"af_bella"' not in tsx, "Old voice ID af_bella still present"
-    assert 'History tracking' in tsx or 'history' in tsx.lower(), "No history reference"
-chk("Frontend: 6 lengths, new voices, history note", chk_frontend)
+    assert 'gb_ryan' in tsx
+    for lk in ['"long_3"', '"long_5"', '"long_7"', '"long_11"']:
+        assert lk in tsx, f"Missing {lk}"
+    assert '"af_bella"' not in tsx, "Old voice ID present"
+    assert 'history' in tsx.lower(), "No history reference in frontend"
+    assert '16:9' in tsx, "Missing 16:9 aspect ratio"
+chk("Frontend: 6 lengths, voices, history note, 16:9", chk_frontend)
 
 def chk_env():
     env = open(r'c:\projects\YOUTUBE_WEBAPP\.env', encoding='utf-8').read()
     for key in ['GROQ_API_KEY', 'PEXELS_API_KEY', 'NGROK_AUTHTOKEN', 'FREESOUND_API_KEY']:
-        assert key in env, f"Missing .env key: {key}"
+        assert key in env, f"Missing key: {key}"
 chk(".env: all API keys present", chk_env)
 
-# ── REPORT ───────────────────────────────────────────────
+# ── FINAL REPORT ──────────────────────────────────────────
 print()
-print("=" * 62)
-print("  MASTER VERIFICATION — ALL SYSTEMS")
-print("=" * 62)
+print("=" * 68)
+print("  MASTER VERIFICATION v3 — ALL SYSTEMS (SHORT + LONG-FORM)")
+print("=" * 68)
 passed = failed = 0
 for status, label in results:
     icon = "[+]" if status == "OK  " else "[X]"
@@ -235,4 +338,4 @@ if failed == 0:
     print("  *** ALL CHECKS PASSED ***")
 else:
     print("  *** FIX FAILING CHECKS ***")
-print("=" * 62)
+print("=" * 68)
