@@ -1,18 +1,29 @@
 """
-THE INNER CITADEL — TTS Engine (edge-tts + FFmpeg Philosophy Voice Chain)
+VOXLORE STUDIO — TTS Engine (edge-tts + FFmpeg Per-Channel Voice Chain)
 
-Targets the sound of top Stoic philosophy YouTube channels:
-  Daily Stoic, Einzelgänger, Philosophies for Life, Ryan Holiday narrations
+Research-based per-channel audio engineering:
 
-Voice Processing Chain (professional order):
-  1. TTS synthesis (edge-tts Neural, slow rate, low pitch)
-  2. High-pass filter @80Hz  — remove sub-bass rumble
-  3. Bass warmth boost @120Hz +6dB — add depth & body
-  4. Mid cut @250Hz -3dB  — remove boxiness
-  5. Presence boost @3kHz +2dB — voice cuts through music
-  6. Dynamic compression — even out dynamics (4:1 ratio)
-  7. Volume boost ×2.5 — loud and authoritative
-  8. Loudnorm I=-14 LUFS — YouTube broadcast standard
+STOIC CHANNEL (The Inner Citadel) — Daily Stoic / Einzelgänger style:
+  Goal: calm authority + contemplation + trust
+  Pace: 120-145 WPM (slow, deliberate, Stoic pacing)
+  Pitch: Lower than natural (-10 to -12Hz)
+  Energy: Controlled, steady
+  Compression: Light (2:1-3:1 ratio)
+  EQ: Warm low-mids, less sharp treble, bass body at 120Hz
+  LUFS: -16 to -14 (slightly quieter, more intimate)
+  BGM: -28 to -32 dB under voice (very subtle)
+  Delivery: Reflective, descending intonation, frequent pauses
+
+TECH CHANNEL (neuralbaba_empire) — Fireship / ByteByteGo style:
+  Goal: clarity + momentum + intellectual excitement
+  Pace: 150-180 WPM (faster, forward-moving)
+  Pitch: Natural or slight energy boost (-4 to -6Hz)
+  Energy: Dynamic, more contrast
+  Compression: Moderate (3:1-4:1), tighter
+  EQ: More presence (3-5kHz boost +3dB), cleaner highs, sharper consonants
+  LUFS: -14 (punchy, clear)
+  BGM: -30 to -35 dB under voice (even more subtle under clear speech)
+  Delivery: Informative, pitch rises on novelty, momentum
 
 Python 3.13 compatible. No GPU. FFmpeg required.
 """
@@ -125,6 +136,73 @@ VOICE_PRESETS = {
 DEFAULT_VOICE = "gb_ryan"
 SAMPLE_RATE   = 24000
 
+# ── Per-channel audio engineering (research-based) ───────────────────
+# Applied in _apply_voice_chain() based on channel_id
+CHANNEL_VOICE_CHAIN = {
+    "stoic": {
+        # Research: Daily Stoic, Einzelgänger, Philosophies for Life, Pursuit of Wonder
+        # Goal: calm authority + contemplation + trust
+        # Pace: 120-145 WPM | Compression: 2:1-3:1 light | LUFS: -16 to -14
+        "af_chain": (
+            # 1. Remove sub-bass rumble
+            "highpass=f=80,"
+            # 2. Bass warmth — depth and body (Stoic channels have warm low-mids)
+            "equalizer=f=120:t=q:w=1.5:g=6,"
+            # 3. Cut boxiness at 250Hz
+            "equalizer=f=250:t=q:w=1:g=-3,"
+            # 4. Presence — voice cuts through dark ambient music
+            "equalizer=f=3000:t=q:w=2:g=2,"
+            # 5. Light compression (2.5:1) — controlled, steady dynamics
+            # Research: Stoic channels use light compression to preserve natural pauses
+            "acompressor=threshold=-20dB:ratio=2.5:attack=8:release=120:makeup=3dB,"
+            # 6. Volume
+            "volume=2.5,"
+            # 7. Loudnorm: -16 LUFS (slightly more intimate than -14)
+            "loudnorm=I=-16:TP=-1.5:LRA=9"
+        ),
+        "fallback_chain": "volume=2.5,loudnorm=I=-16:TP=-1.5",
+    },
+    "tech": {
+        # Research: Fireship, ByteByteGo, NetworkChuck, 3Blue1Brown, Two Minute Papers
+        # Goal: clarity + momentum + intellectual excitement
+        # Pace: 150-180 WPM | Compression: 3:1-4:1 tighter | LUFS: -14
+        "af_chain": (
+            # 1. Remove sub-bass (higher cutoff for cleaner tech sound)
+            "highpass=f=100,"
+            # 2. Less bass warmth — clean and modern (not warm like stoic)
+            "equalizer=f=120:t=q:w=1.5:g=2,"
+            # 3. Cut boxiness
+            "equalizer=f=250:t=q:w=1:g=-2,"
+            # 4. Presence boost (+3dB at 3-5kHz) — sharp consonants, intellectual clarity
+            # Research: Tech channels need more presence to convey momentum and excitement
+            "equalizer=f=3500:t=q:w=1.5:g=3,"
+            # 5. Additional air at 8kHz — crisp, sharp tech narrator sound
+            "equalizer=f=8000:t=q:w=2:g=2,"
+            # 6. Moderate compression (3.5:1) — more dynamic range control
+            # Fireship uses tight compression for punchy delivery
+            "acompressor=threshold=-18dB:ratio=3.5:attack=4:release=60:makeup=4dB,"
+            # 7. Volume
+            "volume=2.5,"
+            # 8. Loudnorm: -14 LUFS (punchy, clear — YouTube standard)
+            "loudnorm=I=-14:TP=-1.5:LRA=7"
+        ),
+        "fallback_chain": "volume=2.5,loudnorm=I=-14:TP=-1.5",
+    },
+    # Default for any new channel
+    "_default": {
+        "af_chain": (
+            "highpass=f=80,"
+            "equalizer=f=120:t=q:w=1.5:g=5,"
+            "equalizer=f=250:t=q:w=1:g=-3,"
+            "equalizer=f=3000:t=q:w=2:g=2,"
+            "acompressor=threshold=-18dB:ratio=4:attack=5:release=80:makeup=4dB,"
+            "volume=2.5,"
+            "loudnorm=I=-14:TP=-1.5:LRA=7"
+        ),
+        "fallback_chain": "volume=2.5,loudnorm=I=-14:TP=-1.5",
+    },
+}
+
 # ── Legacy key map (backward compat) ────────────────────────────
 _LEGACY_MAP = {
     "af_bella":               "us_andrew",
@@ -153,15 +231,15 @@ _LEGACY_MAP = {
 
 class TTSEngine:
     """
-    Microsoft Edge Neural TTS + FFmpeg professional audio chain.
+    Microsoft Edge Neural TTS + FFmpeg per-channel professional audio chain.
 
-    Philosophy YouTube voice sound achieved via:
-      - Slow rate (-14% to -18%) for deliberate Stoic pacing
-      - Low pitch (-6Hz to -12Hz) for gravitas and authority
-      - FFmpeg: HPF + bass warmth + compression + loudnorm
+    Stoic channel (The Inner Citadel):
+      - 120-145 WPM, lower pitch, warm EQ, light compression (2.5:1), -16 LUFS
+    Tech channel (neuralbaba_empire):
+      - 150-180 WPM, natural pitch, presence EQ (+3dB 3.5kHz), tighter compression (3.5:1), -14 LUFS
     """
 
-    def __init__(self, voice: str = DEFAULT_VOICE):
+    def __init__(self, voice: str = DEFAULT_VOICE, channel_id: str = "stoic"):
         resolved = VOICE_PRESETS.get(voice) or VOICE_PRESETS.get(_LEGACY_MAP.get(voice, ""))
         if not resolved:
             logger.warning(f"[TTS] Unknown voice '{voice}' — using default {DEFAULT_VOICE}")
@@ -173,10 +251,13 @@ class TTSEngine:
         self.rate        = resolved["rate"]
         self.pitch       = resolved["pitch"]
         self.sample_rate = SAMPLE_RATE
+        self.channel_id  = channel_id
+        self.chain_cfg   = CHANNEL_VOICE_CHAIN.get(channel_id, CHANNEL_VOICE_CHAIN["_default"])
 
         logger.info(
             f"[TTS] {resolved['flag']} {resolved['label']} "
-            f"| rate={self.rate} pitch={self.pitch}"
+            f"| rate={self.rate} pitch={self.pitch} "
+            f"| chain={channel_id}"
         )
 
     def synthesize(self, script_data: dict, output_path: str) -> str:
@@ -317,34 +398,21 @@ class TTSEngine:
 
     def _apply_voice_chain(self, input_path: str, output_path: str):
         """
-        FFmpeg professional philosophy voice chain:
+        Applies per-channel FFmpeg audio chain. Stoic and tech get different EQ/compression.
 
-          HPF(80Hz)                — remove sub-bass rumble
-          equalizer(120Hz, +6dB)  — add bass body and warmth
-          equalizer(250Hz, -3dB)  — cut boxy mid frequencies
-          equalizer(3000Hz, +2dB) — presence boost, cuts through music
-          acompressor(4:1)        — dynamic compression
-          volume(2.5)             — loud and authoritative
-          loudnorm(-14 LUFS)      — YouTube broadcast standard
+        STOIC (The Inner Citadel):
+          HPF(80Hz) → warmth(120Hz+6dB) → cut(250Hz-3dB) → presence(3kHz+2dB)
+          → light compression (2.5:1) → volume(2.5) → loudnorm(-16 LUFS)
+          Result: warm, controlled, contemplative — Daily Stoic / Einzelgänger feel
 
-        This chain replicates what Daily Stoic / Einzelgänger use.
+        TECH (neuralbaba_empire):
+          HPF(100Hz) → minimal warmth(120Hz+2dB) → cut(250Hz-2dB)
+          → presence(3.5kHz+3dB) → air(8kHz+2dB)
+          → tighter compression (3.5:1) → volume(2.5) → loudnorm(-14 LUFS)
+          Result: clean, sharp, forward-moving — Fireship / ByteByteGo feel
         """
-        af_chain = (
-            # 1. Remove sub-bass rumble
-            "highpass=f=80,"
-            # 2. Bass body — warmth and depth at 120Hz
-            "equalizer=f=120:t=q:w=1.5:g=6,"
-            # 3. Cut boxiness at 250Hz
-            "equalizer=f=250:t=q:w=1:g=-3,"
-            # 4. Presence boost — voice cuts through background music
-            "equalizer=f=3000:t=q:w=2:g=2,"
-            # 5. Dynamic compression — even out dynamics
-            "acompressor=threshold=-18dB:ratio=4:attack=5:release=80:makeup=4dB,"
-            # 6. Volume — loud and commanding
-            "volume=2.5,"
-            # 7. Loudness normalization to YouTube standard (-14 LUFS)
-            "loudnorm=I=-14:TP=-1.5:LRA=7"
-        )
+        af_chain = self.chain_cfg["af_chain"]
+        fallback = self.chain_cfg["fallback_chain"]
 
         # Scale timeout with audio duration for long-form videos
         # loudnorm runs 2 passes: long audio = more processing time
@@ -375,12 +443,12 @@ class TTSEngine:
             # Fallback: just copy with volume boost
             subprocess.run([
                 "ffmpeg", "-i", input_path,
-                "-af", "volume=2.5,loudnorm=I=-14:TP=-1.5",
+                "-af", fallback,
                 "-ar", "44100", "-ac", "1",
                 output_path, "-y",
             ], capture_output=True, check=False, timeout=timeout_s)
 
-        logger.info(f"[TTS] Voice chain applied ({audio_dur:.1f}s) -> {output_path}")
+        logger.info(f"[TTS] Voice chain applied ({audio_dur:.1f}s) [{self.channel_id}] -> {output_path}")
 
     def _clean_text(self, text: str) -> str:
         """

@@ -305,7 +305,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         set_progress(job_id, 2, "🎙️ Synthesizing deep voice (edge-tts + bass chain)...", total_steps)
         from audio.tts_engine import TTSEngine
         audio_path = str(job_dir / "audio.wav")
-        TTSEngine(voice=voice).synthesize(script_data=script, output_path=audio_path)
+        TTSEngine(voice=voice, channel_id=channel).synthesize(script_data=script, output_path=audio_path)
 
         # ── Step 3: Alignment ────────────────────────────────
         set_progress(job_id, 3, "🔬 Aligning words (WhisperX CPU)...", total_steps)
@@ -438,18 +438,20 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
     """
     Final FFmpeg render: mux video + mixed audio + captions + watermark.
 
-    Watermark: Professional transparent text, bottom-center, 35% opacity.
-    Research basis: ByteByteGo, 3Blue1Brown, NetworkChuck style watermarks.
-      - Position: bottom-center (NOT bottom-right — captions are center, watermark above them)
-      - Opacity:  0.35 (35%) — visible but never distracts from content
-      - Color:    white with black 1px shadow — readable on any background
-      - Size:     ~1.8% of frame height (scales automatically)
-      - Timing:   always present throughout video
+    WINDOWS FIX: Use hex RGBA colors instead of 'color@opacity' syntax.
+      - 'white@0.35' fails on Windows FFmpeg → use '0xFFFFFF59' (35% = 0x59)
+      - 'black@0.30' fails on Windows FFmpeg → use '0x0000004D' (30% = 0x4D)
 
-    Long-form fixes:
-      - NO -shortest flag (was cutting audio prematurely)
-      - -t duration: precise output length from timeline
-      - Scaled timeout for 11+ min videos
+    Triple fallback:
+      1. captions + watermark  (full quality)
+      2. watermark only        (if ASS subtitle filter fails)
+      3. bare mux              (if drawtext also fails — always produces a video)
+
+    Watermark design:
+      - Bottom-center, 80px from bottom (above captions)
+      - 35% opacity white text + 30% opacity black shadow
+      - 1.8% of frame height (auto-scales for 9:16 and 16:9)
+      - Font: Arial (cross-platform)
     """
     import subprocess
 
@@ -463,66 +465,98 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
     timeout_s = max(300, int(duration * 2.5) + 120) if duration > 0 else 600
     dur_flags = ["-t", f"{duration:.3f}"] if duration > 0 else []
 
-    # ── Watermark drawtext filter ─────────────────────────────────
-    # Professional transparent watermark:
-    #   - Bottom-center, 80px above bottom (above captions, not covering them)
-    #   - White text, 35% opacity, 1px black shadow for legibility
-    #   - Font size = 1.8% of frame height (auto-scales for 9:16 vs 16:9)
-    #   - No box/background — clean transparent overlay
+    # ── Watermark drawtext filter ─────────────────────────────────────────
+    # CRITICAL: Use hex RGBA notation — 'color@alpha' fails on Windows FFmpeg.
+    # white 35% opacity = 0xFFFFFF59  (0x59 = 89 = 35% of 255)
+    # black 30% opacity = 0x0000004D  (0x4D = 77 = 30% of 255)
     watermark_text = (watermark or "").replace("'", "\\'").replace(":", "\\:")
     if watermark_text:
         wm_filter = (
             f"drawtext="
             f"text='{watermark_text}':"
-            f"fontsize=ih*0.018:"           # 1.8% of frame height (scales per aspect ratio)
-            f"fontcolor=white@0.35:"        # White, 35% opacity — professional standard
-            f"x=(w-text_w)/2:"             # Horizontally centered
-            f"y=h-80:"                     # 80px from bottom (above caption area)
-            f"shadowx=1:shadowy=1:"        # 1px shadow for legibility on bright frames
-            f"shadowcolor=black@0.30:"     # Shadow at 30% opacity — subtle
-            f"font=Arial"                  # Clean sans-serif (standard on all OS)
+            f"fontsize=ih*0.018:"
+            f"fontcolor=0xFFFFFF59:"          # white, 35% opacity — HEX RGBA (Windows safe)
+            f"x=(w-text_w)/2:"               # horizontally centered
+            f"y=h-80:"                        # 80px from bottom
+            f"shadowx=1:shadowy=1:"
+            f"shadowcolor=0x0000004D:"        # black shadow, 30% opacity — HEX RGBA (Windows safe)
+            f"font=Arial"
         )
     else:
         wm_filter = None
 
-    # ── Build vf filter chain: captions [+ watermark] ────────────
-    def build_vf(include_captions: bool) -> str:
-        filters = []
-        if include_captions:
-            filters.append(f"ass='{ass_path}'")
-        if wm_filter:
-            filters.append(wm_filter)
-        return ",".join(filters) if filters else "null"
-
-    # Try with captions + watermark
-    r = subprocess.run([
+    # Base FFmpeg args (no filters yet)
+    base_args = [
         "ffmpeg",
         "-i", video,
         "-i", audio,
-        "-vf", build_vf(include_captions=True),
-        "-c:v", "libx264", "-preset", "fast",
-        "-crf", "23",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         *dur_flags,
-        out, "-y"
-    ], capture_output=True, text=True, timeout=timeout_s)
+        out, "-y",
+    ]
 
-    if r.returncode != 0:
-        logger.warning(f"Caption+watermark render failed: {r.stderr[-200:]} — trying no captions")
-        # Fallback: watermark only (no captions)
-        vf_fallback = build_vf(include_captions=False)
-        subprocess.run([
-            "ffmpeg",
-            "-i", video,
-            "-i", audio,
-            "-vf", vf_fallback,
+    def run_with_vf(vf: str) -> int:
+        """Run ffmpeg with a -vf filter. Returns returncode."""
+        cmd = base_args[:3]  # ffmpeg -i video
+        cmd += ["-i", audio]  # this is duplicate — rebuild correctly
+        cmd = [
+            "ffmpeg", "-i", video, "-i", audio,
+            "-vf", vf,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
-            *dur_flags,
-            out, "-y"
-        ], check=True, capture_output=True, timeout=timeout_s)
+            *dur_flags, out, "-y",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        if r.returncode != 0:
+            logger.warning(f"[Render] vf='{vf[:60]}' failed: {r.stderr[-300:]}")
+        return r.returncode
+
+    def run_bare() -> int:
+        """Run ffmpeg with NO video filter (bare mux). Always works."""
+        cmd = [
+            "ffmpeg", "-i", video, "-i", audio,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            *dur_flags, out, "-y",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        return r.returncode
+
+    # ── ATTEMPT 1: captions + watermark (full quality) ─────────────────────
+    vf_parts = []
+    if captions and ass_path:
+        vf_parts.append(f"ass='{ass_path}'")
+    if wm_filter:
+        vf_parts.append(wm_filter)
+
+    if vf_parts:
+        vf = ",".join(vf_parts)
+        rc = run_with_vf(vf)
+        if rc == 0:
+            logger.info("[Render] ✅ Full render (captions + watermark)")
+            return
+
+    # ── ATTEMPT 2: watermark only (skip ASS — ASS path issue on Windows) ──
+    if wm_filter:
+        rc = run_with_vf(wm_filter)
+        if rc == 0:
+            logger.info("[Render] ✅ Watermark-only render (no captions)")
+            return
+
+    # ── ATTEMPT 3: bare mux — always produces a video ─────────────────────
+    logger.warning("[Render] All filters failed — bare mux (no captions, no watermark)")
+    rc = run_bare()
+    if rc != 0:
+        raise RuntimeError(
+            f"[Render] All 3 fallbacks failed — FFmpeg cannot mux video+audio. "
+            f"Check that raw_video.mp4 and audio_mixed.wav exist."
+        )
+    logger.info("[Render] ✅ Bare mux fallback succeeded")
+
 
 
 def _extract_thumb(video: str, out: str):
