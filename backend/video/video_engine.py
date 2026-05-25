@@ -17,11 +17,15 @@ from pathlib import Path
 from loguru import logger
 
 try:
-    import moviepy.editor as mp
-    import moviepy.video.fx.all as vfx
+    # MoviePy 2.x imports (Python 3.13 compatible)
+    from moviepy import VideoFileClip, ColorClip, concatenate_videoclips
+    import moviepy as mp
     from PIL import Image
 except ImportError:
-    raise ImportError("Run: pip install moviepy Pillow")
+    raise ImportError("Run: pip install moviepy==2.2.1 Pillow")
+
+# Compatibility shim for mp.VideoClip type hints
+mp.VideoClip = VideoFileClip.__bases__[0]  # base class
 
 
 # Resolution map for aspect ratios
@@ -48,7 +52,7 @@ class VideoEngine:
     # Core Jitter-Free Zoom (PIL LANCZOS Override)
     # ─────────────────────────────────────────────
 
-    def _jitter_free_zoom(self, clip: mp.VideoClip, zoom_ratio: float = 0.12) -> mp.VideoClip:
+    def _jitter_free_zoom(self, clip, zoom_ratio: float = 0.12):
         """
         Custom PIL LANCZOS zoom effect — completely eliminates MoviePy's resize wobble.
 
@@ -86,13 +90,13 @@ class VideoEngine:
             img.close()
             return result
 
-        return clip.fl(effect, apply_to=["mask"])
+        return clip.fl(effect)
 
     # ─────────────────────────────────────────────
     # Scene Processing
     # ─────────────────────────────────────────────
 
-    def _process_single_clip(self, video_path: str, duration: float, zoom_ratio: float = 0.12) -> mp.VideoClip:
+    def _process_single_clip(self, video_path: str, duration: float, zoom_ratio: float = 0.12):
         """
         Loads, crops to aspect ratio, zooms, and returns a processed clip.
 
@@ -101,15 +105,14 @@ class VideoEngine:
             duration: Target duration in seconds (from WhisperX timeline)
             zoom_ratio: Ken Burns zoom amount (0.10 = subtle, 0.20 = aggressive)
         """
-        clip = mp.VideoFileClip(video_path).without_audio()
+        clip = VideoFileClip(video_path).without_audio()
 
         # Trim to needed duration
         available = clip.duration
         if available < duration:
-            # Loop if video is shorter than needed
             loops = math.ceil(duration / available)
-            clip = mp.concatenate_videoclips([clip] * loops)
-        clip = clip.subclip(0, duration)
+            clip = concatenate_videoclips([clip] * loops)
+        clip = clip.subclipped(0, duration)   # MoviePy 2.x: subclipped not subclip
 
         # ─── Dynamic Center Crop to target aspect ratio ───────────
         clip_w, clip_h = clip.size
@@ -120,23 +123,21 @@ class VideoEngine:
             # Too wide → crop width
             target_w = int(clip_h * target_ratio)
             x1 = (clip_w - target_w) // 2
-            clip = clip.crop(x1=x1, y1=0, x2=x1 + target_w, y2=clip_h)
-            clip = clip.resize(height=self.h)
+            clip = clip.cropped(x1=x1, y1=0, x2=x1 + target_w, y2=clip_h)
+            clip = clip.resized(height=self.h)   # MoviePy 2.x: resized not resize
         else:
             # Too tall → crop height
             target_h = int(clip_w / target_ratio)
             y1 = (clip_h - target_h) // 2
-            clip = clip.crop(x1=0, y1=y1, x2=clip_w, y2=y1 + target_h)
-            clip = clip.resize(width=self.w)
+            clip = clip.cropped(x1=0, y1=y1, x2=clip_w, y2=y1 + target_h)
+            clip = clip.resized(width=self.w)    # MoviePy 2.x: resized not resize
 
         # Ensure exact resolution
         if clip.size != (self.w, self.h):
-            clip = clip.resize((self.w, self.h))
+            clip = clip.resized((self.w, self.h))
 
-        # ─── Apply Jitter-Free Ken Burns Zoom ────────────────────
         clip = self._jitter_free_zoom(clip, zoom_ratio=zoom_ratio)
-
-        return clip.set_position(("center", "center"))
+        return clip
 
     # ─────────────────────────────────────────────
     # Full Composition
@@ -188,9 +189,9 @@ class VideoEngine:
         logger.info(f"[VideoEngine] Concatenating {len(processed_clips)} clips...")
 
         try:
-            final = mp.concatenate_videoclips(processed_clips, method="compose")
+            final = concatenate_videoclips(processed_clips, method="compose")
         except Exception:
-            final = mp.concatenate_videoclips(processed_clips, method="chain")
+            final = concatenate_videoclips(processed_clips, method="chain")
 
         # Write silent video (audio added separately)
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -228,11 +229,11 @@ class VideoEngine:
         }
         return zoom_map.get(emotion, 0.12)
 
-    def _create_fallback_clip(self, duration: float) -> mp.VideoClip:
+    def _create_fallback_clip(self, duration: float):
         """Creates a solid dark fallback clip."""
-        return mp.ColorClip(
+        return ColorClip(
             size=(self.w, self.h),
-            color=(13, 13, 15),   # Deep charcoal #0D0D0F
+            color=(13, 13, 15),
             duration=duration
         )
 

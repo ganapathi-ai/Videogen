@@ -1,45 +1,37 @@
 # ================================================================
 #  THE INNER CITADEL — Python Dependencies
-#  CPU-Only Mode (Intel, No NVIDIA GPU)
-#  30GB RAM — all models fit comfortably
+#  Python 3.13.0 | Windows | CPU-Only | Intel | No GPU
+#  ALL versions verified compatible with Python 3.13 on Windows
 # ================================================================
 
-# ── Web Framework (FastAPI — no Celery/Redis needed) ────────────
+# ── Web Framework ────────────────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
 python-dotenv==1.0.1
 
-# ── LLM — Multi-provider (Groq + OpenRouter + Gemini) ──────────
+# ── LLM — Groq + OpenRouter + Gemini ────────────────────────────
 google-generativeai
 httpx==0.27.0
 groq
 
-# ── Text-to-Speech — Kokoro (CPU Mode, ~300MB model) ───────────
-# kokoro 0.7.x = compatible with Python 3.13
-# kokoro 0.8+ requires Python <3.13 (not available for Python 3.13)
-kokoro==0.7.16
+# ── Text-to-Speech — edge-tts (Microsoft Neural TTS) ────────────
+# edge-tts works on Python 3.13, no system deps, no GPU needed
+# Uses Microsoft Edge's neural voices — very high quality
+# Requires internet connection (same as Groq/Pexels API calls)
+edge-tts
+
+# ── Audio processing ─────────────────────────────────────────────
 soundfile==0.12.1
-espeakng
-sphinxbase
+scipy
 
-# ── Speech Alignment — WhisperX (CPU, int8 quantization) ───────
-# whisperx is optional — fallback timing used if not installed
-# Install separately (needs torch first):
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-#   pip install whisperx
-# Listed here as optional:
-# whisperx
-
-# ── PyTorch CPU (MUST install before whisperx) ──────────────────
-# Run this FIRST if you want WhisperX alignment:
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-# Otherwise the proportional timing fallback handles it automatically.
-
-# ── Video Composition ────────────────────────────────────────────
-moviepy==1.0.3
+# ── Video Composition — MoviePy 2.x for Python 3.13 ─────────────
+# moviepy 2.x is the Python 3.13 compatible version
+moviepy==2.2.1
 Pillow>=10.4.0
 numpy>=1.26.4
+imageio>=2.36.0
+imageio-ffmpeg>=0.5.1
 
 # ── Subtitle Generation ──────────────────────────────────────────
 pysubs2==1.7.3
@@ -47,8 +39,10 @@ pysubs2==1.7.3
 # ── Media / HTTP ─────────────────────────────────────────────────
 requests==2.32.3
 tenacity==8.2.3
+aiofiles
 
-# ── Semantic Similarity (FAISS CPU version) ──────────────────────
+# ── Semantic Similarity ──────────────────────────────────────────
+# faiss-cpu: no GPU needed, CPU only
 faiss-cpu
 sentence-transformers
 
@@ -61,5 +55,5 @@ loguru==0.7.2
 # ── Ngrok Tunnel (exposes local backend to Vercel) ───────────────
 pyngrok==7.2.0
 
-# ── Utilities ─────────────────────────────────────────────────────
-pathlib2==2.3.7
+# ── Async support ────────────────────────────────────────────────
+anyio

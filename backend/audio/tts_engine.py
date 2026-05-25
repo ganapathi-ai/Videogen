@@ -1,80 +1,88 @@
 """
-THE INNER CITADEL — TTS Engine (CPU Mode)
-Kokoro-82M runs entirely on CPU — works on Intel integrated graphics.
-30GB RAM is more than enough (model uses ~300MB).
+THE INNER CITADEL — TTS Engine (edge-tts)
+Microsoft Edge Neural TTS — Python 3.13 compatible, no GPU, no system deps.
+High-quality neural voices (same engine as Microsoft Edge browser).
+Requires internet (same as Groq/Pexels API calls).
 """
 
 import os
+import asyncio
 import numpy as np
 import soundfile as sf
 from pathlib import Path
 from loguru import logger
 
 
+# ── Voice map: internal name → Edge TTS voice name ───────────────
 VOICE_PRESETS = {
-    "af_bella":  {"style": "warm",      "desc": "Bella — Warm American Female"},
-    "bm_george": {"style": "resonant",  "desc": "George — Deep British Male"},
-    "am_adam":   {"style": "confident", "desc": "Adam — Confident American Male"},
-    "bf_emma":   {"style": "elegant",   "desc": "Emma — Elegant British Female"},
-    "af_sarah":  {"style": "clear",     "desc": "Sarah — Clear American Female"},
-    "am_michael":{"style": "deep",      "desc": "Michael — Deep American Male"},
+    "af_bella":   {"edge": "en-US-JennyNeural",   "desc": "Bella — Warm American Female"},
+    "bm_george":  {"edge": "en-GB-RyanNeural",    "desc": "George — Deep British Male"},
+    "am_adam":    {"edge": "en-US-GuyNeural",     "desc": "Adam — Confident American Male"},
+    "bf_emma":    {"edge": "en-GB-SoniaNeural",   "desc": "Emma — Elegant British Female"},
+    "af_sarah":   {"edge": "en-US-AriaNeural",    "desc": "Sarah — Clear American Female"},
+    "am_michael": {"edge": "en-US-DavisNeural",   "desc": "Michael — Deep American Male"},
 }
+
+SAMPLE_RATE = 24000   # edge-tts output sample rate
 
 
 class TTSEngine:
     """
-    Kokoro-82M TTS — CPU Mode.
-    Intel graphics do not support CUDA. This engine forces CPU.
-    30GB RAM provides ample headroom for the 300MB model.
+    Microsoft Edge Neural TTS Engine.
+    Works on Python 3.13, Windows, Intel CPU — no GPU, no system libraries.
+    Uses edge-tts package (wraps Microsoft Edge's neural TTS API).
     """
 
     def __init__(self, voice: str = "af_bella"):
-        self.voice = voice if voice in VOICE_PRESETS else "af_bella"
-        self.sample_rate = 24000
-        self._pipeline = None
-        logger.info(f"[TTS] Voice: {VOICE_PRESETS[self.voice]['desc']} | Device: CPU")
-
-    def _load(self):
-        """Lazy-load Kokoro pipeline on first call (kokoro 0.7.x for Python 3.13)."""
-        if self._pipeline is not None:
-            return
-        try:
-            # Force CPU — no CUDA
-            os.environ["CUDA_VISIBLE_DEVICES"] = ""
-            from kokoro import KPipeline
-            # kokoro 0.7.x: no device param — always CPU when CUDA not available
-            self._pipeline = KPipeline(lang_code="a")
-            logger.info("[TTS] Kokoro 0.7.x loaded on CPU")
-        except ImportError:
-            raise ImportError(
-                "Kokoro not installed. Run:\n"
-                "  pip install kokoro==0.7.16 soundfile\n"
-                "The model (~300MB) downloads automatically on first use."
-            )
+        self.voice_key = voice if voice in VOICE_PRESETS else "af_bella"
+        self.edge_voice = VOICE_PRESETS[self.voice_key]["edge"]
+        self.sample_rate = SAMPLE_RATE
+        logger.info(
+            f"[TTS] Voice: {VOICE_PRESETS[self.voice_key]['desc']} "
+            f"({self.edge_voice}) | Engine: edge-tts | Device: CPU"
+        )
 
     def synthesize(self, script_data: dict, output_path: str) -> str:
         """
         Synthesizes all script beats into a single WAV file.
-        Adds 0.4s natural pause between beats.
+        Adds natural pauses between beats.
 
         Args:
-            script_data: Script dict from ScriptEngine
-            output_path: Where to save the WAV
+            script_data: Script dict from ScriptEngine (has 'beats' list)
+            output_path: Path to save final WAV
 
         Returns:
-            str: Path to saved WAV
+            str: Path to saved WAV file
         """
-        self._load()
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-
-        # Build full narration text from beats
         beats = script_data.get("beats", [])
         if not beats:
-            raise ValueError("Script has no beats — cannot synthesize audio")
+            raise ValueError("[TTS] Script has no beats — cannot synthesize audio")
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        # Run async synthesis in sync context
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        audio_path = loop.run_until_complete(
+            self._synthesize_async(beats, output_path)
+        )
+        return audio_path
+
+    async def _synthesize_async(self, beats: list, output_path: str) -> str:
+        """Async core: synthesize each beat and concatenate."""
+        import edge_tts
+        import tempfile
 
         segments = []
-        silence_04s = np.zeros(int(self.sample_rate * 0.4), dtype=np.float32)
-        silence_08s = np.zeros(int(self.sample_rate * 0.8), dtype=np.float32)
+        silence_04 = np.zeros(int(self.sample_rate * 0.4), dtype=np.float32)
+        silence_08 = np.zeros(int(self.sample_rate * 0.8), dtype=np.float32)
 
         for i, beat in enumerate(beats):
             text = beat.get("text", "").strip()
@@ -82,40 +90,46 @@ class TTSEngine:
                 continue
 
             intent = beat.get("intent", "")
-            logger.debug(f"[TTS] Beat {i+1}: '{text[:50]}...'")
+            logger.debug(f"[TTS] Beat {i+1}/{len(beats)}: '{text[:60]}'")
 
             try:
-                # kokoro 0.7.x API: generator yields (graphemes, phonemes, audio)
-                audio_chunks = []
-                generator = self._pipeline(
-                    text,
-                    voice=self.voice,
-                    speed=0.88
+                # Write beat audio to temp MP3, then read as numpy
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    tmp_path = tmp.name
+
+                communicate = edge_tts.Communicate(
+                    text=text,
+                    voice=self.edge_voice,
+                    rate="-12%",    # Slightly slower = more Stoic gravitas
+                    volume="+0%",
                 )
-                for gs, ps, audio in generator:
-                    if audio is not None and len(audio) > 0:
-                        audio_chunks.append(
-                            audio if isinstance(audio, np.ndarray)
-                            else np.array(audio, dtype=np.float32)
-                        )
+                await communicate.save(tmp_path)
 
-                if audio_chunks:
-                    beat_audio = np.concatenate(audio_chunks).astype(np.float32)
-                    segments.append(beat_audio)
+                # Convert MP3 → numpy float32 via soundfile
+                audio, sr = sf.read(tmp_path, dtype="float32")
+                os.unlink(tmp_path)   # Clean up temp file
 
-                    # Longer pause after hook and close beats
-                    if intent in ("hook", "close"):
-                        segments.append(silence_08s)
-                    else:
-                        segments.append(silence_04s)
+                # Mono-mix if stereo
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                segments.append(audio)
+
+                # Pause after each beat
+                if intent in ("hook", "close"):
+                    segments.append(silence_08)
+                else:
+                    segments.append(silence_04)
+
+                logger.info(f"[TTS] Beat {i+1} done: {len(audio)/self.sample_rate:.2f}s")
 
             except Exception as e:
                 logger.warning(f"[TTS] Beat {i+1} failed: {e} — skipping")
 
         if not segments:
-            raise RuntimeError("TTS produced no audio segments")
+            raise RuntimeError("[TTS] No audio segments produced")
 
-        full_audio = np.concatenate(segments)
+        full_audio = np.concatenate(segments).astype(np.float32)
 
         # Normalize to prevent clipping
         max_val = np.abs(full_audio).max()
@@ -124,5 +138,7 @@ class TTSEngine:
 
         sf.write(output_path, full_audio, self.sample_rate, format="WAV")
         duration = len(full_audio) / self.sample_rate
-        logger.info(f"[TTS] ✅ Synthesized {len(beats)} beats → {duration:.2f}s → {output_path}")
+        logger.info(
+            f"[TTS] Synthesized {len(beats)} beats → {duration:.2f}s → {output_path}"
+        )
         return output_path
