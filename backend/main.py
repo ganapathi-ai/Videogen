@@ -175,6 +175,13 @@ async def get_result(job_id: str):
     return job["result"]
 
 
+@app.get("/api/voices")
+async def list_voices():
+    """Returns all available TTS voices for the frontend."""
+    from audio.tts_engine import get_voice_list
+    return {"voices": get_voice_list()}
+
+
 @app.get("/api/health")
 async def health():
     active = sum(1 for j in JOBS.values() if j["state"] == "running")
@@ -327,19 +334,32 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
 
 def _ffmpeg_render(video: str, audio: str, captions: str, out: str, fps: int):
     import subprocess
-    # Try with burned captions first
+
+    # Fix Windows path for FFmpeg ass= filter:
+    # Backslashes → forward slashes, colon after drive letter escaped as \:
+    def _escape_ass_path(p: str) -> str:
+        p = p.replace("\\", "/")
+        # Escape the drive colon: C:/path → C\:/path
+        if len(p) >= 2 and p[1] == ":":
+            p = p[0] + "\\:" + p[2:]
+        return p
+
+    ass_path = _escape_ass_path(captions)
+
+    # Try with burned-in captions first
     r = subprocess.run([
         "ffmpeg", "-i", video, "-i", audio,
-        "-vf", f"ass={captions},fps={fps}",
-        "-c:v", "libx264", "-preset", "fast",   # 'fast' for CPU
-        "-crf", "23",                             # Quality-based (no fixed bitrate)
+        "-vf", f"ass='{ass_path}'",
+        "-c:v", "libx264", "-preset", "fast",
+        "-crf", "23",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", "-shortest",
         out, "-y"
     ], capture_output=True, text=True)
 
     if r.returncode != 0:
-        # Fallback without burned captions
+        logger.warning(f"Caption burn-in failed: {r.stderr[-200:]} — falling back")
+        # Fallback without captions
         subprocess.run([
             "ffmpeg", "-i", video, "-i", audio,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",

@@ -42,35 +42,49 @@ class Script(BaseModel):
 # Prompts
 # ─────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an elite cinematic script writer for "THE INNER CITADEL" — a premium Stoic philosophy YouTube channel targeting 18-35 year olds.
+SYSTEM_PROMPT = """You are an elite cinematic narrator writing spoken-word scripts for THE INNER CITADEL — a Stoic philosophy YouTube channel.
 
-STRICT RULES:
-1. Each beat MUST be 5-10 words. Short. Punchy. Powerful. No exceptions.
-2. Follow arc: Hook → Pain → Insight → Reframe → Action → Close
-3. Use Marcus Aurelius, Epictetus, Seneca — be specific, not generic
-4. Language = cinematic spoken word poetry, NOT academic
-5. Visual keywords = evocative, cinematic search terms
-6. YOU MUST respond ONLY with a valid JSON object. No explanation, no markdown, no preamble.
-7. The JSON must exactly match the provided schema."""
+CRITICAL RULES — follow every single one:
+1. NEVER mention any philosopher name (no Epictetus, no Seneca, no Marcus Aurelius, no Stoics). The narrator IS the voice — no attributions.
+2. NEVER use commas. Commas make TTS pause unnaturally. Use short separate sentences instead.
+3. Each beat must be 6-12 words. One powerful self-contained statement.
+4. Write as if you are SPEAKING directly to the viewer. Use "you" and "your". Personal. Urgent.
+5. Language must feel like spoken poetry — short punchy words. NOT academic prose.
+6. The arc must flow: Hook → Pain → Insight → Reframe → Action → Close
+7. No commas. No colons. No semicolons. No parentheses. No dashes. Only periods.
+8. YOU MUST respond ONLY with valid JSON. No explanation. No markdown. No preamble.
+9. The JSON must exactly match the schema provided."""
 
 def _user_prompt(topic: str, duration_target: int, num_beats: int) -> str:
-    return f"""Generate a {duration_target}-second Stoic philosophy video script about: "{topic}"
+    return f"""Generate a {duration_target}-second spoken-word Stoic video script about: "{topic}"
 
 Target exactly {num_beats} beats.
-Each beat = 5-10 words MAXIMUM.
-Make it feel urgent, cinematic, personal to the viewer.
-Reference specific Stoics and their ideas.
+Each beat = 6-12 words MAXIMUM. One idea per beat.
+Write as direct speech to the viewer. No names. No commas. Only periods.
 
-Return ONLY this JSON structure:
+GOOD example beats:
+  "Your mind is not your identity."
+  "Every thought you resist will consume you."
+  "The pain you feel is not permanent."
+  "You have always had the power to choose."
+  "Begin now. Act. Do not hesitate."
+
+BAD examples (avoid):
+  "You are not your thoughts, Epictetus" — DO NOT add names
+  "Ego fuels your inner turmoil, Seneca" — DO NOT add names
+  "Recognize the ego's power, Stoics" — DO NOT add names
+  "Let go, breathe, and find peace" — DO NOT use commas
+
+Return ONLY this JSON:
 {{
   "title": "string",
   "topic": "{topic}",
   "duration_target": {duration_target},
-  "hook": "string (max 10 words)",
+  "hook": "string (max 10 words. no commas. grabs attention instantly)",
   "beats": [
     {{
       "id": 1,
-      "text": "5-10 word Stoic statement",
+      "text": "6-12 word statement. No commas. No names.",
       "emotion": "one of: minimal|deep|emotional|modern|resolute|inspiring|steady|reassuring",
       "intent": "one of: hook|pain|insight|reframe|action|close",
       "visual_keywords": ["search term 1", "search term 2"]
