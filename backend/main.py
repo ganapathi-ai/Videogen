@@ -193,10 +193,17 @@ async def list_voices():
 
 @app.get("/api/history")
 async def get_history():
-    """Returns content generation history stats + past topics."""
-    from history.history_engine import HistoryEngine
-    h = HistoryEngine()
-    return {"stats": h.get_stats(), "past_topics": h.get_all_topics()}
+    """Returns per-channel history stats + past topics. No channel mixing."""
+    from history.history_engine import HistoryEngine, HISTORY_FILES
+    result = {}
+    for ch_id in HISTORY_FILES:
+        h = HistoryEngine(channel_id=ch_id)
+        result[ch_id] = {
+            "stats":       h.get_stats(),
+            "past_topics": h.get_all_topics(),
+        }
+    return {"channels": result, "note": "Each channel's history is completely isolated"}
+
 
 
 @app.get("/api/health")
@@ -251,7 +258,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         from generator.script_engine import ScriptEngine, LENGTH_CONFIG
         from history.history_engine import HistoryEngine
 
-        history = HistoryEngine()
+        history = HistoryEngine(channel_id=channel)  # Channel-isolated — no mixing!
         cfg = LENGTH_CONFIG.get(length, LENGTH_CONFIG["short"])
         total_steps = 11 if cfg["type"] == "long" else 9
         JOBS[job_id]["total"] = total_steps
@@ -399,7 +406,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
 
         # ── Save to history (after success) ──────────────────
         try:
-            history.save(script, length=length)
+            history.save(script, length=length)   # Saves to channel-specific file
         except Exception as hist_e:
             logger.warning(f"[History] Save failed (non-fatal): {hist_e}")
 

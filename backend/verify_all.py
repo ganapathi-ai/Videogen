@@ -77,14 +77,14 @@ chk("No af_bella default outside legacy map", chk_no_af_bella_default)
 # ── GROUP 3: History Engine ──────────────────────────────
 def chk_history_structure():
     from history.history_engine import HistoryEngine, TOPIC_SIMILARITY_THRESHOLD, BEAT_SIMILARITY_THRESHOLD
-    h = HistoryEngine()
+    h = HistoryEngine(channel_id="stoic")
     assert 0.5 < TOPIC_SIMILARITY_THRESHOLD < 1.0
     assert 0.5 < BEAT_SIMILARITY_THRESHOLD  < 1.0
 chk("History: engine structure + thresholds", chk_history_structure)
 
 def chk_history_topic_check():
     from history.history_engine import HistoryEngine
-    h = HistoryEngine()
+    h = HistoryEngine(channel_id="stoic")
     score_same, _ = h._best_topic_match("Overcoming Fear", ["Overcoming Fear"])
     assert score_same > 0.9, f"Same topic score: {score_same}"
     score_diff, _ = h._best_topic_match("The Beauty of Rain", ["Overcoming Fear"])
@@ -93,34 +93,37 @@ chk("History: topic similarity scoring", chk_history_topic_check)
 
 def chk_history_beat_filter():
     from history.history_engine import HistoryEngine
-    h = HistoryEngine()
+    h = HistoryEngine(channel_id="stoic")
     past = ["Your mind is not your identity."]
     assert h._is_duplicate_beat("Your mind is not your identity.", past)
     assert not h._is_duplicate_beat("Strength grows from facing what you fear.", past)
 chk("History: beat deduplication logic", chk_history_beat_filter)
 
+
 def chk_history_save_load():
     import tempfile
     from pathlib import Path
-    from history import history_engine as he
-    orig = he.HISTORY_FILE
-    tmp = Path(tempfile.mktemp(suffix='.jsonl'))
-    he.HISTORY_FILE = tmp
-    try:
-        h = he.HistoryEngine(); h._cache = None
-        dummy = {"topic": "Test Topic", "title": "Test Title",
-                 "beats": [{"text": "You choose how you respond."}, {"text": "Every moment is a test."}]}
-        h.save(dummy, length="short")
-        h._cache = None
-        loaded = h._load()
-        assert len(loaded) == 1
-        assert loaded[0]["topic"] == "Test Topic"
-        assert h.get_stats()["total_videos"] == 1
-    finally:
-        he.HISTORY_FILE = orig
-        try: tmp.unlink()
-        except: pass
+    from history.history_engine import HistoryEngine, HISTORY_FILES
+    # Verify per-channel isolation: two distinct files
+    assert "stoic" in HISTORY_FILES, "stoic must be in HISTORY_FILES"
+    assert "tech"  in HISTORY_FILES, "tech must be in HISTORY_FILES"
+    hs = HistoryEngine(channel_id="stoic")
+    ht = HistoryEngine(channel_id="tech")
+    assert hs.history_file != ht.history_file, "Stoic+Tech must use separate history files"
+    # Test save + load on stoic channel
+    dummy = {"topic": "Test Topic Verify", "title": "Test Title",
+             "beats": [{"text": "You choose how you respond."}, {"text": "Every moment is a test."}]}
+    hs.save(dummy, length="short")
+    hs._cache = None
+    loaded = hs._load()
+    assert len(loaded) >= 1
+    assert loaded[-1]["topic"] == "Test Topic Verify"
+    assert loaded[-1]["channel"] == "stoic", "channel field must be saved"
+    stats = hs.get_stats()
+    assert stats["total_videos"] >= 1
+    assert stats["channel"] == "stoic"
 chk("History: save + load + get_stats", chk_history_save_load)
+
 
 def chk_history_normalize():
     from history.history_engine import HistoryEngine
