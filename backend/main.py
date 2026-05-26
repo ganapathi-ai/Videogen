@@ -335,6 +335,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             pixabay_key=os.getenv("PIXABAY_API_KEY", ""),
             unsplash_key=os.getenv("UNSPLASH_ACCESS_KEY", ""),
             faiss_engine=faiss,
+            channel_id=channel,
         )
         clips = []
         for seg in timeline["segments"]:
@@ -462,13 +463,20 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
     """
     import subprocess
 
-    def _escape_ass_path(p: str) -> str:
-        p = p.replace("\\", "/")
-        if len(p) >= 2 and p[1] == ":":
-            p = p[0] + "\\:" + p[2:]
-        return p
+    # ── ASS path fix for Windows FFmpeg ─────────────────────────────────────
+    # PROBLEM: FFmpeg's ass= filter cannot handle Windows absolute paths (C:\...)
+    # through any escaping strategy (forward-slash, \\:, :: — all fail with exit 4294967274).
+    # SOLUTION: Copy the ASS file to a relative path in CWD (no drive letter, no colon).
+    # FFmpeg finds it as "tmp_captions_XXXX.ass" with zero path issues.
+    import shutil, uuid as _uuid
+    ass_rel = None
+    if captions and os.path.exists(captions):
+        ass_rel = f"tmp_captions_{_uuid.uuid4().hex[:8]}.ass"
+        shutil.copy2(captions, ass_rel)   # copy to CWD (backend/)
+        ass_path = ass_rel                # relative path — no escaping needed
+    else:
+        ass_path = None
 
-    ass_path  = _escape_ass_path(captions)
     timeout_s = max(300, int(duration * 2.5) + 120) if duration > 0 else 600
     dur_flags = ["-t", f"{duration:.3f}"] if duration > 0 else []
 
@@ -506,12 +514,12 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
 
     def run_with_vf(vf: str) -> int:
         """Run ffmpeg with a -vf filter. Returns returncode."""
-        cmd = base_args[:3]  # ffmpeg -i video
-        cmd += ["-i", audio]  # this is duplicate — rebuild correctly
         cmd = [
             "ffmpeg", "-i", video, "-i", audio,
             "-vf", vf,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p",            # CRITICAL: required for Windows/mobile playback
+            "-profile:v", "high", "-level", "4.0",  # H.264 High profile — universal compatibility
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             *dur_flags, out, "-y",
@@ -526,6 +534,8 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
         cmd = [
             "ffmpeg", "-i", video, "-i", audio,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high", "-level", "4.0",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             *dur_flags, out, "-y",
@@ -533,36 +543,45 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         return r.returncode
 
-    # ── ATTEMPT 1: captions + watermark (full quality) ─────────────────────
-    vf_parts = []
-    if captions and ass_path:
-        vf_parts.append(f"ass='{ass_path}'")
-    if wm_filter:
-        vf_parts.append(wm_filter)
+    try:
+        # ── ATTEMPT 1: captions + watermark (full quality) ───────────────────
+        vf_parts = []
+        if ass_path:
+            vf_parts.append(f"ass='{ass_path}'")
+        if wm_filter:
+            vf_parts.append(wm_filter)
 
-    if vf_parts:
-        vf = ",".join(vf_parts)
-        rc = run_with_vf(vf)
-        if rc == 0:
-            logger.info("[Render] ✅ Full render (captions + watermark)")
-            return
+        if vf_parts:
+            vf = ",".join(vf_parts)
+            rc = run_with_vf(vf)
+            if rc == 0:
+                logger.info("[Render] ✅ Full render (captions + watermark)")
+                return
 
-    # ── ATTEMPT 2: watermark only (skip ASS — ASS path issue on Windows) ──
-    if wm_filter:
-        rc = run_with_vf(wm_filter)
-        if rc == 0:
-            logger.info("[Render] ✅ Watermark-only render (no captions)")
-            return
+        # ── ATTEMPT 2: watermark only (ASS failed) ───────────────────────────
+        if wm_filter:
+            rc = run_with_vf(wm_filter)
+            if rc == 0:
+                logger.info("[Render] ✅ Watermark-only render (captions failed)")
+                return
 
-    # ── ATTEMPT 3: bare mux — always produces a video ─────────────────────
-    logger.warning("[Render] All filters failed — bare mux (no captions, no watermark)")
-    rc = run_bare()
-    if rc != 0:
-        raise RuntimeError(
-            f"[Render] All 3 fallbacks failed — FFmpeg cannot mux video+audio. "
-            f"Check that raw_video.mp4 and audio_mixed.wav exist."
-        )
-    logger.info("[Render] ✅ Bare mux fallback succeeded")
+        # ── ATTEMPT 3: bare mux — always produces a video ────────────────────
+        logger.warning("[Render] All filters failed — bare mux (no captions, no watermark)")
+        rc = run_bare()
+        if rc != 0:
+            raise RuntimeError(
+                "[Render] All 3 fallbacks failed — FFmpeg cannot mux video+audio. "
+                "Check that raw_video.mp4 and audio_mixed.wav exist."
+            )
+        logger.info("[Render] ✅ Bare mux fallback succeeded")
+
+    finally:
+        # Clean up temp ASS file copied to CWD for Windows path workaround
+        if ass_rel and os.path.exists(ass_rel):
+            try:
+                os.unlink(ass_rel)
+            except Exception:
+                pass
 
 
 

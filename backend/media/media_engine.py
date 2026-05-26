@@ -1,11 +1,16 @@
 """
-THE INNER CITADEL — Free Media Engine
-Priority: Pexels (video) → Unsplash (photo→video) → Placeholder
+VOXLORE STUDIO — Free Media Engine (Stock + AI Generated)
 
-Pexels: cinematic videos (your primary key)
-Unsplash: high-quality photos converted to Ken Burns video clips
-Pixabay: disabled (no key), gracefully skipped
-FAISS: semantic filtering (cosine ≥ 0.70 — relaxed for better recall)
+Priority per segment:
+  1. Pexels video          — best quality, cinematic stock footage
+  2. Pixabay video         — additional stock (if key present)
+  3. Unsplash photo        — high-quality photos → animated Ken Burns video
+  4. AI Image Generation   — Gemini Imagen 3 → OpenRouter Flux → Pollinations.ai
+                             (channel-aware prompts — tech gets digital art, stoic gets cinematic)
+  5. Channel gradient      — FFmpeg animated gradient (absolute last resort, always works)
+
+Channel-aware: tech channel triggers AI image generation earlier (stock footage less relevant).
+Stoic channel: stock footage (landscapes, nature) usually works well from Pexels.
 """
 
 import os
@@ -16,29 +21,35 @@ from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 
-SIMILARITY_THRESHOLD = 0.70   # Relaxed from 0.82 — better recall without Pixabay
+SIMILARITY_THRESHOLD = 0.70   # Relaxed — better recall without Pixabay
 
 
 class FreeMediaEngine:
     """
     Fetches stock video clips from Pexels + Unsplash.
-    Falls back to solid-color placeholder only if both fail.
+    Falls back to AI-generated images (Gemini Imagen 3 / OpenRouter Flux / Pollinations)
+    when stock footage is unavailable or irrelevant (especially for tech topics).
     """
 
     def __init__(self, pexels_key: str, pixabay_key: str, faiss_engine,
-                 unsplash_key: str = ""):
+                 unsplash_key: str = "", channel_id: str = "stoic"):
         self.pexels_key   = pexels_key
-        self.pixabay_key  = pixabay_key   # May be empty — handled gracefully
+        self.pixabay_key  = pixabay_key
         self.unsplash_key = unsplash_key or os.getenv("UNSPLASH_ACCESS_KEY", "")
         self.faiss_engine = faiss_engine
+        self.channel_id   = channel_id
+
+        # AI image engine — lazy init on first use
+        self._ai_engine   = None
 
         available = []
         if self.pexels_key:   available.append("Pexels ✅")
         if self.pixabay_key:  available.append("Pixabay ✅")
         else:                  available.append("Pixabay ❌ (no key)")
         if self.unsplash_key: available.append("Unsplash ✅")
+        available.append("AI-Imagen ✅")   # always available (Pollinations needs no key)
 
-        logger.info(f"[MediaEngine] Sources: {', '.join(available)}")
+        logger.info(f"[MediaEngine:{channel_id}] Sources: {', '.join(available)}")
 
         self.orientation_map = {
             "9:16": "portrait",
@@ -46,54 +57,106 @@ class FreeMediaEngine:
             "1:1":  "square",
         }
 
+    @property
+    def ai_engine(self):
+        """Lazy-init AI image engine."""
+        if self._ai_engine is None:
+            from media.ai_image_engine import AIImageEngine
+            self._ai_engine = AIImageEngine(channel_id=self.channel_id)
+        return self._ai_engine
+
     def fetch_best_clip(self, script_text: str, queries: list, aspect_ratio: str,
                         job_dir: str, segment_id: int) -> str:
         """
-        Fetches the best matching clip for a script segment.
+        Fetches or generates the best visual clip for a script segment.
+
+        For tech channel: if Pexels returns irrelevant results (abstract tech topics
+        like 'neural network', 'binary search', 'transformer model'), AI generation
+        is triggered immediately after Pexels attempt fails — no Unsplash fallback needed
+        since stock photos of abstract CS concepts don't exist.
+
+        For stoic channel: stock footage (landscapes, nature, architecture) is usually
+        sufficient. AI is triggered only when stock sources are fully exhausted.
 
         Priority:
-          1. Pexels video (highest quality)
-          2. Unsplash photo → animated Ken Burns video
-          3. Solid dark placeholder (last resort)
+          1. Pexels video (all channels)
+          2. Pixabay video (if key present)
+          3. Unsplash photo → Ken Burns (all channels, but skipped for abstract tech)
+          4. AI image generation (channel-aware, context-specific prompts)
+          5. Gradient placeholder (always works)
         """
         orientation = self.orientation_map.get(aspect_ratio, "portrait")
         w, h = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080)}.get(aspect_ratio, (1080, 1920))
 
         for query in queries:
-            logger.info(f"[MediaEngine] Query: '{query}' ({orientation})")
+            logger.info(f"[MediaEngine:{self.channel_id}] Query: '{query}' ({orientation})")
 
-            # 1. Pexels video
+            # ── 1. Pexels video ──────────────────────────────────────────
             if self.pexels_key:
                 clip = self._fetch_pexels(script_text, query, orientation, job_dir, segment_id)
                 if clip:
                     return clip
 
-            # 2. Pixabay video (if key present)
+            # ── 2. Pixabay video (if key) ────────────────────────────────
             if self.pixabay_key:
                 clip = self._fetch_pixabay(script_text, query, orientation, job_dir, segment_id)
                 if clip:
                     return clip
 
-            # 3. Unsplash photo → Ken Burns video
-            if self.unsplash_key:
+            # ── 3. Unsplash photo → Ken Burns ────────────────────────────
+            # Skip for abstract tech queries that have no real-world stock images
+            if self.unsplash_key and not self._is_abstract_tech_query(query):
                 clip = self._fetch_unsplash_as_video(
                     script_text, query, orientation, job_dir, segment_id, w, h
                 )
                 if clip:
                     return clip
 
-        # Last resort
-        logger.warning(f"[MediaEngine] No media found for segment {segment_id}. Using placeholder.")
-        return self._generate_placeholder(job_dir, segment_id, aspect_ratio)
+            # ── 4. AI image generation (per-query, context-aware) ────────
+            # For tech channel: try AI for EVERY failed query (abstract topics need it)
+            # For stoic channel: try AI only as last resort within queries
+            if self.channel_id == "tech" or queries.index(query) == len(queries) - 1:
+                logger.info(f"[MediaEngine:{self.channel_id}] Generating AI image for: '{query}'")
+                clip = self.ai_engine.generate_clip(
+                    beat_text=script_text,
+                    visual_keywords=queries,  # Pass all keywords for richer context
+                    job_dir=job_dir,
+                    segment_id=segment_id,
+                    aspect_ratio=aspect_ratio,
+                    duration=10.0,
+                )
+                if clip:
+                    return clip
 
-    # ─────────────────────────────────────────────────────────
+        # ── 5. Absolute last resort: gradient ────────────────────────────
+        logger.warning(f"[MediaEngine:{self.channel_id}] All sources failed for segment {segment_id}")
+        return self.ai_engine._generate_gradient_video(job_dir, segment_id, w, h)
+
+    def _is_abstract_tech_query(self, query: str) -> bool:
+        """
+        Returns True for queries that have no relevant stock footage.
+        These are abstract CS/AI concepts where only AI generation can create
+        a relevant visual — stock photo sites have nothing useful.
+        """
+        abstract_tech_keywords = {
+            "neural", "algorithm", "transformer", "model", "llm", "attention",
+            "backpropagation", "gradient", "vector", "embedding", "token",
+            "compiler", "binary", "recursion", "api", "docker", "kubernetes",
+            "encryption", "protocol", "database index", "hash", "tcp", "ssl",
+            "quantum", "superposition", "qubit", "bandwidth", "latency",
+            "training", "inference", "weights", "activation", "softmax",
+        }
+        q_lower = query.lower()
+        return any(kw in q_lower for kw in abstract_tech_keywords)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Pexels
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _fetch_pexels(self, script_text: str, query: str, orientation: str,
                       job_dir: str, segment_id: int) -> str:
-        """Fetches video from Pexels API. Takes best result directly (no FAISS filter)."""
+        """Fetches video from Pexels API."""
         try:
             resp = requests.get(
                 "https://api.pexels.com/videos/search",
@@ -116,7 +179,6 @@ class FreeMediaEngine:
                 videos = resp2.json().get("videos", [])
 
             for video in videos:
-                # Pick the best MP4 file (highest resolution that fits)
                 files = sorted(
                     video.get("video_files", []),
                     key=lambda x: x.get("width", 0),
@@ -126,17 +188,16 @@ class FreeMediaEngine:
                     if vf.get("file_type") == "video/mp4":
                         path = self._download(vf["link"], job_dir, segment_id, "pexels")
                         if path:
-                            logger.info(f"[MediaEngine] Pexels: '{query}' -> {path}")
+                            logger.info(f"[MediaEngine:{self.channel_id}] Pexels: '{query}' -> {Path(path).name}")
                             return path
 
         except Exception as e:
-            logger.warning(f"[MediaEngine] Pexels error for '{query}': {e}")
+            logger.warning(f"[MediaEngine:{self.channel_id}] Pexels error '{query}': {e}")
         return None
 
-
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Pixabay
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(2))
     def _fetch_pixabay(self, script_text: str, query: str, orientation: str,
@@ -162,26 +223,26 @@ class FreeMediaEngine:
                         if url:
                             path = self._download(url, job_dir, segment_id, "pixabay")
                             if path:
-                                logger.info(f"[MediaEngine] ✅ Pixabay: sim={sim:.2f}")
+                                logger.info(f"[MediaEngine:{self.channel_id}] Pixabay: sim={sim:.2f}")
                                 return path
 
         except Exception as e:
-            logger.warning(f"[MediaEngine] Pixabay error: {e}")
+            logger.warning(f"[MediaEngine:{self.channel_id}] Pixabay error: {e}")
         return None
 
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Unsplash → Ken Burns animated video
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def _fetch_unsplash_as_video(self, script_text: str, query: str, orientation: str,
                                   job_dir: str, segment_id: int, w: int, h: int) -> str:
         """
-        Downloads a cinematic photo from Unsplash and converts it to a
-        Ken Burns slow-zoom video clip using FFmpeg zoompan filter.
+        Downloads a cinematic photo from Unsplash and converts to Ken Burns video.
+        Best for: nature, architecture, landscapes, people (stoic channel).
+        Skipped for abstract tech queries — AI generation is better.
         """
         try:
-            # Fetch photo
             resp = requests.get(
                 "https://api.unsplash.com/search/photos",
                 headers={"Authorization": f"Client-ID {self.unsplash_key}"},
@@ -196,8 +257,7 @@ class FreeMediaEngine:
                 description = (photo.get("description") or photo.get("alt_description") or query)
                 sim = self.faiss_engine.compute_similarity(script_text, description)
 
-                if sim >= (SIMILARITY_THRESHOLD - 0.10):  # Slightly lower for photos
-                    # Download the highest resolution available
+                if sim >= (SIMILARITY_THRESHOLD - 0.10):
                     urls = photo.get("urls", {})
                     img_url = urls.get("full") or urls.get("regular")
                     if not img_url:
@@ -208,43 +268,35 @@ class FreeMediaEngine:
                     img_resp.raise_for_status()
                     Path(img_path).write_bytes(img_resp.content)
 
-                    # Convert photo to 10s Ken Burns video with FFmpeg zoompan
                     out = str(Path(job_dir) / f"clip_{segment_id:03d}_unsplash.mp4")
                     duration = 10
                     fps = 30
 
                     ffmpeg_cmd = [
-                        "ffmpeg",
-                        "-loop", "1",
-                        "-i", img_path,
+                        "ffmpeg", "-loop", "1", "-i", img_path,
                         "-vf", (
                             f"scale={w * 2}:{h * 2},"
                             f"zoompan=z='min(zoom+0.0015,1.5)':d={duration * fps}:"
                             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-                            f"s={w}x{h}:fps={fps},"
-                            f"setsar=1"
+                            f"s={w}x{h}:fps={fps},setsar=1"
                         ),
-                        "-c:v", "libx264",
-                        "-t", str(duration),
-                        "-preset", "fast",
-                        "-crf", "23",
+                        "-c:v", "libx264", "-t", str(duration),
+                        "-preset", "fast", "-crf", "23",
                         "-pix_fmt", "yuv420p",
                         out, "-y"
                     ]
                     result = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=120)
                     if result.returncode == 0 and Path(out).exists():
-                        logger.info(f"[MediaEngine] ✅ Unsplash→video: sim={sim:.2f} → {out}")
+                        logger.info(f"[MediaEngine:{self.channel_id}] Unsplash→video: sim={sim:.2f} -> {Path(out).name}")
                         return out
-                    else:
-                        logger.warning(f"[MediaEngine] FFmpeg zoompan failed: {result.stderr[:200]}")
 
         except Exception as e:
-            logger.warning(f"[MediaEngine] Unsplash error: {e}")
+            logger.warning(f"[MediaEngine:{self.channel_id}] Unsplash error: {e}")
         return None
 
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # Helpers
-    # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _download(self, url: str, job_dir: str, segment_id: int, source: str) -> str:
         """Downloads a video file to local storage."""
@@ -256,21 +308,18 @@ class FreeMediaEngine:
                     for chunk in r.iter_content(chunk_size=16384):
                         f.write(chunk)
             size_mb = Path(out).stat().st_size / 1024 / 1024
-            logger.info(f"[MediaEngine] Downloaded {size_mb:.1f}MB → {out}")
+            logger.info(f"[MediaEngine:{self.channel_id}] Downloaded {size_mb:.1f}MB -> {Path(out).name}")
             return out
         except Exception as e:
-            logger.error(f"[MediaEngine] Download error: {e}")
+            logger.error(f"[MediaEngine:{self.channel_id}] Download error: {e}")
             return None
 
+    # Keep backward-compatible name (called from verify_all)
     def _generate_placeholder(self, job_dir: str, segment_id: int, aspect_ratio: str) -> str:
-        """Creates a dark cinematic placeholder video (absolute last resort)."""
+        """Backward-compat: calls AI gradient generator."""
         w, h = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080)}.get(aspect_ratio, (1080, 1920))
-        out = str(Path(job_dir) / f"placeholder_{segment_id:03d}.mp4")
-        subprocess.run([
-            "ffmpeg", "-f", "lavfi",
-            "-i", f"color=c=0x1a1a2e:s={w}x{h}:r=30",
-            "-t", "10", "-c:v", "libx264",
-            out, "-y"
-        ], capture_output=True, check=False)
-        logger.warning(f"[MediaEngine] Placeholder created: {out}")
-        return out
+        return self.ai_engine._generate_gradient_video(job_dir, segment_id, w, h)
+
+
+# Alias for backward compatibility
+MediaEngine = FreeMediaEngine

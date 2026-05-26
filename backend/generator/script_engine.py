@@ -275,11 +275,15 @@ class OpenRouterClient:
 
 
 class GeminiClient:
-    """Google Gemini API — 1M tokens/day free. Fallback."""
+    """Google Gemini API — free tier, 1500 req/day. Used as fallback."""
+
+    # gemini-1.5-flash is deprecated (404 since early 2026)
+    # gemini-2.0-flash is the current free fast model
+    DEFAULT_MODEL = "gemini-2.0-flash"
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "")
-        self.model   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model   = os.getenv("GEMINI_MODEL", self.DEFAULT_MODEL)
 
     def available(self) -> bool:
         return bool(self.api_key and self.api_key != "YOUR_GEMINI_KEY_HERE")
@@ -330,7 +334,7 @@ class ScriptEngine:
             )
         logger.info(f"[ScriptEngine] Available LLMs: {', '.join(available)}")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=5, max=60))
     def generate_script(self, topic: str, length: str = "short",
                          used_beats: list = None, channel_id: str = "stoic") -> dict:
         """
@@ -447,6 +451,12 @@ class ScriptEngine:
             this_chapter_beats.extend(chapter_beat_list)
             logger.info(f"[ScriptEngine] Chapter '{chapter['name']}' done: {len(chapter_beat_list)} beats")
 
+            # Rate-limit guard: sleep between chapter calls to avoid 429s
+            # Long videos have 6 chapters — without sleep, rapid-fire calls hit Groq/OpenRouter limits
+            if chapter != LONG_FORM_CHAPTERS[-1]:  # No sleep after last chapter
+                import time
+                time.sleep(3)
+
         result = {
             "title":           title,
             "topic":           topic,
@@ -465,7 +475,8 @@ class ScriptEngine:
     # ─────────────────────────────────────────────
 
     def _call_with_fallback(self, system: str, user: str, max_tokens: int = 2048) -> str:
-        """Try each LLM in priority order."""
+        """Try each LLM in priority order. Backs off on 429 rate limits."""
+        import time
         errors = []
 
         if self.groq.available():
@@ -474,8 +485,12 @@ class ScriptEngine:
                 logger.info("[ScriptEngine] Used: Groq")
                 return r
             except Exception as e:
-                logger.warning(f"[ScriptEngine] Groq failed: {e}")
+                err_str = str(e)
+                logger.warning(f"[ScriptEngine] Groq failed: {err_str[:120]}")
                 errors.append(f"Groq: {e}")
+                if "429" in err_str:
+                    logger.info("[ScriptEngine] Groq 429 — waiting 8s before next LLM")
+                    time.sleep(8)
 
         if self.openrouter.available():
             try:
@@ -483,8 +498,12 @@ class ScriptEngine:
                 logger.info("[ScriptEngine] Used: OpenRouter")
                 return r
             except Exception as e:
-                logger.warning(f"[ScriptEngine] OpenRouter failed: {e}")
+                err_str = str(e)
+                logger.warning(f"[ScriptEngine] OpenRouter failed: {err_str[:120]}")
                 errors.append(f"OpenRouter: {e}")
+                if "429" in err_str:
+                    logger.info("[ScriptEngine] OpenRouter 429 — waiting 5s before Gemini")
+                    time.sleep(5)
 
         if self.gemini.available():
             try:
@@ -492,7 +511,7 @@ class ScriptEngine:
                 logger.info("[ScriptEngine] Used: Gemini")
                 return r
             except Exception as e:
-                logger.warning(f"[ScriptEngine] Gemini failed: {e}")
+                logger.warning(f"[ScriptEngine] Gemini failed: {str(e)[:120]}")
                 errors.append(f"Gemini: {e}")
 
         raise RuntimeError("All LLMs failed:\n" + "\n".join(errors))

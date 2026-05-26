@@ -56,16 +56,17 @@ class CaptionEngine:
 
         # ─── Style Definition ─────────────────────────────────────
         style = pysubs2.SSAStyle()
-        style.fontname = "Montserrat"
-        style.fontsize = 72
-        style.primarycolor = pysubs2.Color(255, 255, 255, 0)    # White, fully opaque
-        style.outlinecolor = pysubs2.Color(0, 0, 0, 200)        # Black outline
-        style.backcolor = pysubs2.Color(0, 0, 0, 128)           # Semi-transparent bg
-        style.bold = True
-        style.alignment = 2      # Bottom-center (we override pos in each event)
-        style.outline = 3
-        style.shadow = 5
-        style.marginv = int(self.h * 0.25)   # 25% from bottom = 75% from top
+        style.fontname    = "Arial"                                  # Arial: guaranteed on all Windows systems
+        style.fontsize    = 72                                        # Large enough for mobile screens
+        style.primarycolor  = pysubs2.Color(255, 255, 255, 0)        # White, fully opaque (alpha=0 = opaque in ASS)
+        style.outlinecolor  = pysubs2.Color(0,   0,   0,   0)        # Black outline, fully opaque (was 200=transparent!)
+        style.backcolor     = pysubs2.Color(0,   0,   0,   180)      # Semi-transparent black backing
+        style.bold          = True
+        style.italic        = False
+        style.alignment     = 2       # Bottom-center (overridden per-event by \pos)
+        style.outline       = 4       # Thick outline — readable on any background
+        style.shadow        = 2       # Subtle shadow for depth
+        style.marginv       = int(self.h * 0.25)  # 25% from bottom = 75% from top
 
         subs.styles["Default"] = style
 

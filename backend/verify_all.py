@@ -33,7 +33,8 @@ def chk(label, fn):
 MODULES = [
     "main", "generator.script_engine", "audio.tts_engine",
     "audio.audio_mixer", "audio.bgm_engine", "alignment.align_engine",
-    "timeline.timeline_engine", "media.media_engine", "embeddings.faiss_engine",
+    "timeline.timeline_engine", "media.media_engine", "media.ai_image_engine",
+    "embeddings.faiss_engine",
     "video.video_engine", "captions.caption_engine", "validator.validator",
     "history.history_engine",
 ]
