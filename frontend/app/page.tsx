@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import GenerateForm, { type GenerateOptions } from "./components/GenerateForm";
 import ProgressBar, { type ProgressState }   from "./components/ProgressBar";
 import ResultCard                             from "./components/ResultCard";
+import PostSuggestionsPanel                   from "./components/PostSuggestionsPanel";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
@@ -81,7 +82,8 @@ export default function HomePage() {
   });
   const [result, setResult]         = useState<{
     video_url: string; captions_url: string; timeline_url: string;
-    title: string; duration: number;
+    title: string; topic: string; channel: string;
+    duration: number; script_excerpt: string;
   } | null>(null);
   const [error, setError]           = useState<string | null>(null);
   const [channels, setChannels]     = useState<ChannelInfo[]>(DEFAULT_CHANNELS);
@@ -115,10 +117,14 @@ export default function HomePage() {
         if (data.state === "done") {
           evtSource.close();
           setResult({
-            video_url: data.video_url || "", captions_url: data.captions_url || "",
-            timeline_url: data.timeline_url || "",
-            title: data.title || activeChannel.name,
-            duration: data.duration || 0,
+            video_url:      data.video_url      || "",
+            captions_url:   data.captions_url   || "",
+            timeline_url:   data.timeline_url   || "",
+            title:          data.title          || activeChannel.name,
+            topic:          data.topic          || "",
+            channel:        data.channel        || activeChannel.id,
+            duration:       data.duration       || 0,
+            script_excerpt: data.script_excerpt || "",
           });
           setAppState("done");
         } else if (data.state === "error" || data.state === "closed") {
@@ -143,9 +149,14 @@ export default function HomePage() {
           clearInterval(interval);
           const rd = await (await fetch(`${BACKEND_URL}/api/result/${tid}`)).json();
           setResult({
-            video_url: rd.video_url || "", captions_url: rd.captions_url || "",
-            timeline_url: rd.timeline_url || "",
-            title: rd.title || activeChannel.name, duration: rd.duration || 0,
+            video_url:      rd.video_url      || "",
+            captions_url:   rd.captions_url   || "",
+            timeline_url:   rd.timeline_url   || "",
+            title:          rd.title          || activeChannel.name,
+            topic:          rd.topic          || "",
+            channel:        rd.channel        || activeChannel.id,
+            duration:       rd.duration       || 0,
+            script_excerpt: rd.script_excerpt || "",
           });
           setAppState("done");
         } else if (data.status === "failed") {
@@ -395,14 +406,26 @@ export default function HomePage() {
               {/* LEFT: Form or Result */}
               <div>
                 {appState === "done" && result ? (
-                  <ResultCard
-                    videoUrl={result.video_url}
-                    captionsUrl={result.captions_url}
-                    timelineUrl={result.timeline_url}
-                    title={result.title}
-                    duration={result.duration}
-                    onReset={handleReset}
-                  />
+                  <>
+                    <ResultCard
+                      videoUrl={result.video_url}
+                      captionsUrl={result.captions_url}
+                      timelineUrl={result.timeline_url}
+                      title={result.title}
+                      duration={result.duration}
+                      onReset={handleReset}
+                    />
+                    {/* SEO Post Suggestions Panel — auto-loads after every video */}
+                    <PostSuggestionsPanel
+                      backendUrl={BACKEND_URL}
+                      title={result.title}
+                      topic={result.topic}
+                      channel={result.channel}
+                      duration={result.duration}
+                      scriptExcerpt={result.script_excerpt}
+                      accentColor={accent}
+                    />
+                  </>
                 ) : (
                   <div className="glass-card" style={{ padding: 36 }}>
                     <div style={{ marginBottom: 24 }}>

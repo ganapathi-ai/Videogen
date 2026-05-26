@@ -226,6 +226,90 @@ async def health():
             "total_jobs": len(JOBS), "mode": "CPU"}
 
 
+class PostSuggestionsRequest(BaseModel):
+    title: str
+    topic: str
+    channel: str = "stoic"
+    duration: float = 60.0          # seconds
+    script_excerpt: str = ""        # first ~300 chars of script for context
+
+
+@app.post("/api/post-suggestions")
+async def generate_post_suggestions(req: PostSuggestionsRequest):
+    """
+    Generate SEO-optimized post copy for every generated video:
+      - YouTube title (3 variants, click-optimised)
+      - YouTube description (500 chars, SEO keywords, timestamps, CTA)
+      - Instagram caption (hashtags, emojis, CTA)
+      - Twitter/X thread (3-tweet thread)
+      - 30 SEO hashtags (mixed broad + niche)
+      - Thumbnail prompt (Midjourney/DALL-E style) — always included
+    """
+    import google.generativeai as genai
+
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+
+    is_long    = req.duration >= 120
+    video_type = "long-form YouTube video" if is_long else "YouTube Short / Reel"
+    channel_label = "Stoic philosophy wisdom" if req.channel == "stoic" else "tech/AI concept explainer"
+
+    prompt = f"""You are a top-tier YouTube SEO strategist and social media copywriter for a {channel_label} channel.
+
+Video details:
+  Title: {req.title}
+  Topic: {req.topic}
+  Type: {video_type} ({req.duration:.0f}s)
+  Channel style: {channel_label}
+  {"Script excerpt: " + req.script_excerpt[:300] if req.script_excerpt else ""}
+
+Generate ALL of the following as a single valid JSON object (no markdown, no code fences):
+
+{{
+  "youtube_titles": ["<title 1, curiosity hook>", "<title 2, benefit-driven>", "<title 3, question-based>"],
+  "youtube_description": "<500-char SEO description with keywords, 2 CTAs (Subscribe + Comment), 3 relevant timestamps if long video>",
+  "instagram_caption": "<punchy 3-line caption with emojis, hook, value, CTA, 5 hashtags inline>",
+  "twitter_thread": ["<tweet 1 - hook, max 280 chars>", "<tweet 2 - insight>", "<tweet 3 - CTA + link>"],
+  "hashtags": ["<30 SEO hashtags — mix of broad, niche, channel-specific, no # prefix>"],
+  "thumbnail_prompt": "<Midjourney-style prompt for a high-CTR YouTube thumbnail: bold text overlay, dramatic lighting, specific visual elements, style keywords, aspect ratio 16:9>"
+}}
+
+Rules:
+- YouTube title: max 60 chars, power word at start, number or question if natural
+- Description: first 2 lines must hook without "click more", natural keyword density
+- Instagram: Reels-style, 3 short punchy lines then hashtags
+- Hashtags: 10 broad (1M+ posts) + 10 medium + 10 niche/channel-specific
+- Thumbnail: describe the EXACT visual scene, not abstract. Include text overlay words.
+- Return ONLY the JSON. No other text."""
+
+    try:
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        resp  = model.generate_content(prompt)
+        raw   = resp.text.strip()
+        # Strip markdown fences if model returns them
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        import json as _json
+        data = _json.loads(raw.strip())
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"[PostSuggestions] Error: {e}")
+        # Return graceful fallback
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "youtube_titles": [req.title],
+                "youtube_description": f"Watch this video about {req.topic}. Like and Subscribe for more!",
+                "instagram_caption": f"New video: {req.topic} 🔥\nWatch now!\n#youtube #content",
+                "twitter_thread": [f"Just posted: {req.title}", f"Topic: {req.topic}", "Watch now! 🔗"],
+                "hashtags": ["youtube", "contentcreator", "viral", req.topic.lower().replace(" ", "")],
+                "thumbnail_prompt": f"YouTube thumbnail for '{req.topic}', bold text overlay, dramatic lighting, 16:9"
+            }
+        }
+
+
 # ─────────────────────────────────────────────
 # Pipeline Runner (runs in background)
 # ─────────────────────────────────────────────
@@ -411,15 +495,23 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
             captions_path=captions_path, timeline=timeline
         )
 
+
+        # Build script excerpt for post-suggestions (first ~400 chars of beat texts)
+        beats = script.get("beats", [])
+        script_excerpt = " ".join(b.get("text", "") for b in beats[:5])[:400]
+
         result = {
-            "job_id":       job_id,
-            "title":        script.get("title", topic),
-            "duration":     timeline.get("duration", 0),
-            "video_url":    f"{backend_url}/exports/{job_id}/final_video.mp4",
-            "captions_url": f"{backend_url}/exports/{job_id}/captions.ass",
-            "timeline_url": f"{backend_url}/exports/{job_id}/timeline.json",
-            "thumbnail_url":f"{backend_url}/exports/{job_id}/thumbnail.jpg",
-            "validation":   report,
+            "job_id":         job_id,
+            "title":          script.get("title", topic),
+            "topic":          topic,
+            "channel":        channel,
+            "duration":       timeline.get("duration", 0),
+            "script_excerpt": script_excerpt,
+            "video_url":      f"{backend_url}/exports/{job_id}/final_video.mp4",
+            "captions_url":   f"{backend_url}/exports/{job_id}/captions.ass",
+            "timeline_url":   f"{backend_url}/exports/{job_id}/timeline.json",
+            "thumbnail_url":  f"{backend_url}/exports/{job_id}/thumbnail.jpg",
+            "validation":     report,
         }
 
         # ── Save to history (after success) ──────────────────

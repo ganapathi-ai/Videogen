@@ -33,21 +33,51 @@ class AlignmentEngine:
 
     def generate_word_timestamps(self, audio_path: str) -> list:
         """
-        Runs WhisperX transcription + forced alignment on CPU.
+        Word-level timestamp generation — 3-tier priority:
 
-        Args:
-            audio_path: Path to WAV audio file
+        TIER 1 (PRIMARY): edge-tts WordBoundary events  ← THIS IS USED
+          Source: captured by TTSEngine._synthesize_raw() via comm.stream()
+          Precision: 100 nanoseconds (0.0000001s)
+          Accuracy: exact — no estimation, no drift for any video length
+          File: <audio_path.replace('.wav', '_word_boundaries.json')>
 
-        Returns:
-            list: [{"word": str, "start": float, "end": float}, ...]
+        TIER 2 (SECONDARY): WhisperX forced alignment
+          Source: Whisper-base transcription + wav2vec2 alignment model
+          Precision: ~10ms
+          Accuracy: good but requires internet model download
+          Used when: edge-tts JSON not found
+
+        TIER 3 (FALLBACK): Precision silence-detection
+          Source: waveform amplitude analysis
+          Precision: ~50ms
+          Accuracy: rough but better than fixed offsets
+          Used when: WhisperX not installed or fails
         """
+        # ── TIER 1: edge-tts exact boundaries ───────────────────────────
+        bounds_path = audio_path.replace(".wav", "_word_boundaries.json")
+        if os.path.exists(bounds_path):
+            try:
+                import json as _json
+                with open(bounds_path, encoding="utf-8") as f:
+                    bounds = _json.load(f)
+                if bounds and isinstance(bounds, list) and len(bounds) > 0:
+                    if "word" in bounds[0] and "start" in bounds[0]:
+                        logger.info(
+                            f"[Align] TIER 1: edge-tts exact boundaries "
+                            f"({len(bounds)} words, 100ns precision)"
+                        )
+                        return bounds
+            except Exception as e:
+                logger.warning(f"[Align] Could not load edge-tts boundaries: {e}")
+
+        # ── TIER 2: WhisperX forced alignment ───────────────────────────
         try:
             return self._whisperx_align(audio_path)
         except ImportError:
-            logger.warning("[Align] WhisperX not installed — using fallback timing")
+            logger.warning("[Align] WhisperX not installed — using TIER 3 fallback")
             return self._fallback_timing(audio_path)
         except Exception as e:
-            logger.error(f"[Align] WhisperX failed: {e} — using fallback")
+            logger.error(f"[Align] WhisperX failed: {e} — using TIER 3 fallback")
             return self._fallback_timing(audio_path)
 
     def _whisperx_align(self, audio_path: str) -> list:
