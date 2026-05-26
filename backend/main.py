@@ -526,10 +526,14 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
         cmd = [
             "ffmpeg", "-i", video, "-i", audio,
             "-vf", vf,
+            # Video: H.264 Main Profile — supported by ALL Windows players including WMP
+            # 'high' profile requires DXVA hardware decoder; WMP falls back to 'unsupported'
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-pix_fmt", "yuv420p",            # CRITICAL: required for Windows/mobile playback
-            "-profile:v", "high", "-level", "4.0",  # H.264 High profile — universal compatibility
-            "-c:a", "aac", "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "main", "-level", "4.0",
+            # Audio: FORCE stereo 44100Hz — Windows Media Player rejects mono AAC in MP4
+            # edge-tts outputs 24kHz mono → must upsample to 44100Hz stereo for WMP
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart",
             *dur_flags, out, "-y",
         ]
@@ -544,8 +548,8 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
             "ffmpeg", "-i", video, "-i", audio,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-pix_fmt", "yuv420p",
-            "-profile:v", "high", "-level", "4.0",
-            "-c:a", "aac", "-b:a", "192k",
+            "-profile:v", "main", "-level", "4.0",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart",
             *dur_flags, out, "-y",
         ]
