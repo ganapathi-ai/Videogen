@@ -29,12 +29,24 @@ class CaptionEngine:
     - Position: center, 75% down screen height
     """
 
-    def __init__(self, resolution: tuple = (1080, 1920)):
+    def __init__(self, resolution: tuple = (1080, 1920), fps: int = 30):
         self.w, self.h = resolution
+        self.fps       = fps
+        self.frame_ms  = 1000.0 / fps          # ms per frame (33.33ms at 30fps)
         # Anchor at 75% screen height (research mandate)
         self.safe_y = int(self.h * 0.75)
         self.words_per_line = 4    # Words displayed simultaneously
-        logger.info(f"[CaptionEngine] Resolution: {self.w}x{self.h}, Y-anchor: {self.safe_y}")
+        logger.info(f"[CaptionEngine] Resolution: {self.w}x{self.h}, Y-anchor: {self.safe_y}, fps={fps}")
+
+    def _snap_to_frame(self, seconds: float) -> float:
+        """Snap a timestamp to the nearest video frame boundary.
+        
+        At 30fps, frames start at 0.000, 0.033, 0.066, 0.100, ...
+        Snapping ensures the subtitle appears on the exact frame
+        the word is spoken — eliminates up to 16ms of visible lag.
+        """
+        frame_num = round(seconds * self.fps)
+        return frame_num / self.fps
 
     def build_ass_subtitles(self, timeline: dict, output_path: str = "exports/captions.ass") -> str:
         """
@@ -102,9 +114,18 @@ class CaptionEngine:
                     pos_tag = f"{{\\pos({self.w // 2},{self.safe_y})}}"
                     full_text = pos_tag + line_text
 
+                    # Snap to frame boundaries so caption appears on the EXACT frame
+                    # the word starts — eliminates up to 16ms of visible lag at 30fps
+                    snap_start = self._snap_to_frame(active_word["start"])
+                    snap_end   = self._snap_to_frame(active_word["end"])
+
+                    # Minimum 1 frame duration — prevents zero-duration events
+                    if snap_end <= snap_start:
+                        snap_end = snap_start + (1.0 / self.fps)
+
                     event = pysubs2.SSAEvent(
-                        start=pysubs2.make_time(s=active_word["start"]),
-                        end=pysubs2.make_time(s=active_word["end"]),
+                        start=pysubs2.make_time(s=snap_start),
+                        end=pysubs2.make_time(s=snap_end),
                         text=full_text,
                     )
                     subs.append(event)

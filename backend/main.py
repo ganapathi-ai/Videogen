@@ -362,7 +362,7 @@ def _pipeline_sync(job_id: str, topic: str, length: str,
         from captions.caption_engine import CaptionEngine
         w, h = {"9:16":(1080,1920),"16:9":(1920,1080),"1:1":(1080,1080)}.get(aspect_ratio,(1080,1920))
         captions_path = str(job_dir / "captions.ass")
-        CaptionEngine(resolution=(w, h)).build_ass_subtitles(
+        CaptionEngine(resolution=(w, h), fps=fps).build_ass_subtitles(
             timeline=timeline, output_path=captions_path
         )
 
