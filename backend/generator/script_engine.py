@@ -277,9 +277,16 @@ class OpenRouterClient:
 class GeminiClient:
     """Google Gemini API — free tier, 1500 req/day. Used as fallback."""
 
+    # Model priority list: try each in order until one works
     # gemini-1.5-flash is deprecated (404 since early 2026)
     # gemini-2.0-flash is the current free fast model
     DEFAULT_MODEL = "gemini-2.0-flash"
+    FALLBACK_MODELS = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.5-flash-preview-05-20",
+        "gemini-1.5-flash-latest",
+    ]
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "")
@@ -292,16 +299,33 @@ class GeminiClient:
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=self.api_key)
-        response = client.models.generate_content(
-            model=self.model,
-            contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=0.78,
-                response_mime_type="application/json",
-            ),
-        )
-        return response.text
+
+        # Try primary model, then fallbacks if 404
+        models_to_try = [self.model] + [
+            m for m in self.FALLBACK_MODELS if m != self.model
+        ]
+        last_err = None
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        temperature=0.78,
+                        response_mime_type="application/json",
+                    ),
+                )
+                if model_name != self.model:
+                    logger.info(f"[ScriptEngine] Gemini fallback model used: {model_name}")
+                return response.text
+            except Exception as e:
+                last_err = e
+                if "404" in str(e) or "NOT_FOUND" in str(e):
+                    logger.warning(f"[ScriptEngine] Gemini model '{model_name}' not found, trying next...")
+                    continue
+                raise  # Non-404 errors propagate immediately
+        raise last_err  # All models failed
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -334,7 +358,7 @@ class ScriptEngine:
             )
         logger.info(f"[ScriptEngine] Available LLMs: {', '.join(available)}")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=5, max=60))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=5, max=60))
     def generate_script(self, topic: str, length: str = "short",
                          used_beats: list = None, channel_id: str = "stoic") -> dict:
         """
@@ -451,11 +475,12 @@ class ScriptEngine:
             this_chapter_beats.extend(chapter_beat_list)
             logger.info(f"[ScriptEngine] Chapter '{chapter['name']}' done: {len(chapter_beat_list)} beats")
 
-            # Rate-limit guard: sleep between chapter calls to avoid 429s
-            # Long videos have 6 chapters — without sleep, rapid-fire calls hit Groq/OpenRouter limits
+            # Rate-limit guard: sleep between chapter calls to avoid 429 cascade
+            # Groq free tier: ~30 req/min window. 6 chapters in <10s = guaranteed 429.
+            # 10s gap lets Groq/OpenRouter reset between calls.
             if chapter != LONG_FORM_CHAPTERS[-1]:  # No sleep after last chapter
                 import time
-                time.sleep(3)
+                time.sleep(10)
 
         result = {
             "title":           title,

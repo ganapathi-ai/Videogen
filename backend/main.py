@@ -445,23 +445,49 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
                    watermark: str = ""):
     """
     Final FFmpeg render: mux video + mixed audio + captions + watermark.
-
-    WINDOWS FIX: Use hex RGBA colors instead of 'color@opacity' syntax.
-      - 'white@0.35' fails on Windows FFmpeg → use '0xFFFFFF59' (35% = 0x59)
-      - 'black@0.30' fails on Windows FFmpeg → use '0x0000004D' (30% = 0x4D)
-
-    Triple fallback:
-      1. captions + watermark  (full quality)
-      2. watermark only        (if ASS subtitle filter fails)
-      3. bare mux              (if drawtext also fails — always produces a video)
-
-    Watermark design:
-      - Bottom-center, 80px from bottom (above captions)
-      - 35% opacity white text + 30% opacity black shadow
-      - 1.8% of frame height (auto-scales for 9:16 and 16:9)
-      - Font: Arial (cross-platform)
     """
     import subprocess
+
+    # ── Watermark drawtext filter ──────────────────────────────────────────────
+    # CRITICAL: Use hex RGBA notation — 'color@alpha' fails on Windows FFmpeg.
+    # white 35% opacity = 0xFFFFFF59  (0x59 = 89 = 35% of 255)
+    # black 30% opacity = 0x0000004D  (0x4D = 77 = 30% of 255)
+    #
+    # IMPORTANT: Do NOT use ih*0.018 expression in fontsize —
+    # this fails with 'Undefined constant' when chained after ass= filter (FFmpeg 8.x Windows).
+    # Instead compute pixel size from the known video resolution.
+    watermark_text = (watermark or "").replace("'", "\\'").replace(":", "\\:")
+
+    # Detect video height from the raw video file to set correct pixel fontsize
+    _h = 1920  # default: vertical 9:16
+    try:
+        import json as _json
+        _p = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_streams", "-select_streams", "v",
+             "-print_format", "json", video],
+            capture_output=True, text=True, timeout=8
+        )
+        _streams = _json.loads(_p.stdout).get("streams", [])
+        if _streams:
+            _h = _streams[0].get("height", 1920)
+    except Exception:
+        pass
+    _wm_fontsize = max(18, int(_h * 0.018))  # 1.8% of height, min 18px
+
+    if watermark_text:
+        wm_filter = (
+            f"drawtext="
+            f"text='{watermark_text}':"
+            f"fontsize={_wm_fontsize}:"
+            f"fontcolor=0xFFFFFF59:"           # white, 35% opacity — HEX RGBA (Windows safe)
+            f"x=(w-text_w)/2:"                # horizontally centered
+            f"y=h-80:"                         # 80px from bottom
+            f"shadowx=1:shadowy=1:"
+            f"shadowcolor=0x0000004D:"         # black shadow, 30% opacity — HEX RGBA
+            f"font=Arial"
+        )
+    else:
+        wm_filter = None
 
     # ── ASS path fix for Windows FFmpeg ─────────────────────────────────────
     # PROBLEM: FFmpeg's ass= filter cannot handle Windows absolute paths (C:\...)
@@ -481,24 +507,7 @@ def _ffmpeg_render(video: str, audio: str, captions: str, out: str,
     dur_flags = ["-t", f"{duration:.3f}"] if duration > 0 else []
 
     # ── Watermark drawtext filter ─────────────────────────────────────────
-    # CRITICAL: Use hex RGBA notation — 'color@alpha' fails on Windows FFmpeg.
-    # white 35% opacity = 0xFFFFFF59  (0x59 = 89 = 35% of 255)
-    # black 30% opacity = 0x0000004D  (0x4D = 77 = 30% of 255)
-    watermark_text = (watermark or "").replace("'", "\\'").replace(":", "\\:")
-    if watermark_text:
-        wm_filter = (
-            f"drawtext="
-            f"text='{watermark_text}':"
-            f"fontsize=ih*0.018:"
-            f"fontcolor=0xFFFFFF59:"          # white, 35% opacity — HEX RGBA (Windows safe)
-            f"x=(w-text_w)/2:"               # horizontally centered
-            f"y=h-80:"                        # 80px from bottom
-            f"shadowx=1:shadowy=1:"
-            f"shadowcolor=0x0000004D:"        # black shadow, 30% opacity — HEX RGBA (Windows safe)
-            f"font=Arial"
-        )
-    else:
-        wm_filter = None
+
 
     # Base FFmpeg args (no filters yet)
     base_args = [
